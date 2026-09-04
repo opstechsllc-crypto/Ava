@@ -23,6 +23,7 @@ import { annotateSourceDelivery, executeMessagePoll } from "./message-action-exe
 import { runMessageAction } from "./message-action-runner.js";
 import {
   registerReplyPlugin,
+  runCurrentConversationDiceAction,
   runCurrentConversationPollAction,
   runReplyAction,
 } from "./message-action-runner.test-support.js";
@@ -579,6 +580,23 @@ describe("runMessageAction reply-type plugin actions", () => {
     registerReplyPlugin();
 
     const result = await runCurrentConversationPollAction({ to: "direct:someone-else" });
+
+    expect((result.payload as { sourceReplyRoute?: unknown }).sourceReplyRoute).toBeUndefined();
+  });
+
+  it("marks targeted visible sends to the current conversation as current-source deliveries", async () => {
+    registerReplyPlugin();
+
+    const result = await runCurrentConversationDiceAction({ to: "direct:user-1" });
+
+    expect(result.kind).toBe("action");
+    expect(result.payload).toMatchObject({ sourceReplyRoute: "current-source" });
+  });
+
+  it("leaves targeted visible sends to other conversations unmarked", async () => {
+    registerReplyPlugin();
+
+    const result = await runCurrentConversationDiceAction({ to: "direct:someone-else" });
 
     expect((result.payload as { sourceReplyRoute?: unknown }).sourceReplyRoute).toBeUndefined();
   });
