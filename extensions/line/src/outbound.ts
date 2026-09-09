@@ -32,7 +32,11 @@ import {
   renderLinePresentation,
 } from "./rich-messages.js";
 import { getLineRuntime } from "./runtime.js";
-import { explainLineRefusal } from "./send-retry.js";
+import {
+  explainLineRefusal,
+  findLineHttpError,
+  resolveLineNonDispatchRetryable,
+} from "./send-retry.js";
 import type { LineChannelData, LineSendResult, ResolvedLineAccount } from "./types.js";
 
 const loadLineOutboundRuntime = createLazyRuntimeModule(() => import("./outbound.runtime.js"));
@@ -151,11 +155,43 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
     const quickReplyLabels = quickReplyItems.length
       ? quickReplyItems.map((item) => item.label)
       : quickReplies;
+    let shouldBatchMixedPayload = false;
+    const pendingMessages: messagingApi.Message[] = [];
 
     const sendMessageBatch = async (messages: messagingApi.Message[]) => {
+      if (messages.length === 0) {
+        return;
+      }
       for (let i = 0; i < messages.length; i += 5) {
         const batch = messages.slice(i, i + 5);
-        await recordResult(sendBatch(to, batch, sendOptions));
+        try {
+          await recordResult(sendBatch(to, batch, sendOptions));
+        } catch (error) {
+          const httpError = findLineHttpError(error);
+          if (
+            !isChannelPartialDeliveryError(error) &&
+            httpError?.status === 400 &&
+            resolveLineNonDispatchRetryable(error) !== undefined
+          ) {
+            const retryCandidates = [...batch, ...messages.slice(i + batch.length)];
+            const recoveryErrors: unknown[] = [];
+            for (const message of retryCandidates) {
+              try {
+                await recordResult(sendBatch(to, [message], sendOptions));
+              } catch (recoveryError) {
+                recoveryErrors.push(recoveryError);
+              }
+            }
+            if (recoveryErrors.length === 0) {
+              return;
+            }
+            const acceptedRecoveryError = recoveryErrors.find(isChannelPartialDeliveryError);
+            if (acceptedRecoveryError) {
+              throw acceptedRecoveryError;
+            }
+          }
+          throw error;
+        }
       }
     };
 
@@ -168,6 +204,10 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
       messageId: replyToId,
     });
     const sendTextWithQuickReply = async (text: string, quoteToken?: string) => {
+      if (shouldBatchMixedPayload && quickReply) {
+        pendingMessages.push({ type: "text", text, quickReply, ...quotedOption(quoteToken) });
+        return;
+      }
       if (quickReplyItems.length > 0 && quickReply) {
         await sendMessageBatch([{ type: "text", text, quickReply, ...quotedOption(quoteToken) }]);
         return;
@@ -201,42 +241,82 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
       trackingId: lineData.trackingId,
     };
     const shouldSendQuickRepliesInline = !hasText && hasQuickReplies;
+    const templateMessage = lineData.templateMessage
+      ? buildTemplate(lineData.templateMessage)
+      : undefined;
+    const mediaMessageCount = mediaUrls.filter((url) => Boolean(url?.trim())).length;
+    const messageKinds = new Set<string>();
+    if (lineData.flexMessage) messageKinds.add("flex");
+    if (templateMessage) messageKinds.add("template");
+    if (locationMessage) messageKinds.add(locationMessage.type);
+    for (const message of orderedMessages) {
+      messageKinds.add(message.type);
+    }
+    if (mediaMessageCount > 0) messageKinds.add("media");
+    shouldBatchMixedPayload = !shouldSendQuickRepliesInline && messageKinds.size > 1;
     const sendMediaMessages = async () => {
       for (const url of mediaUrls) {
         const trimmed = url?.trim();
         if (!trimmed) {
           continue;
         }
-        await recordResult(
-          sendText(to, "", {
-            ...sendOptions,
-            ...mediaOptions,
-            mediaUrl: trimmed,
-          }),
-        );
+        if (shouldBatchMixedPayload) {
+          pendingMessages.push(await buildLineMediaMessage(trimmed, mediaOptions, to));
+        } else {
+          await recordResult(
+            sendText(to, "", {
+              ...sendOptions,
+              ...mediaOptions,
+              mediaUrl: trimmed,
+            }),
+          );
+        }
       }
     };
 
     if (!shouldSendQuickRepliesInline) {
       if (lineData.flexMessage) {
         const flexContents = lineData.flexMessage.contents as Parameters<typeof sendFlex>[2];
-        await recordResult(sendFlex(to, lineData.flexMessage.altText, flexContents, sendOptions));
+        if (shouldBatchMixedPayload) {
+          pendingMessages.push(
+            outboundRuntime.createFlexMessage(lineData.flexMessage.altText, flexContents),
+          );
+        } else {
+          await recordResult(sendFlex(to, lineData.flexMessage.altText, flexContents, sendOptions));
+        }
       }
 
-      if (lineData.templateMessage) {
-        const template = buildTemplate(lineData.templateMessage);
-        if (template?.type === "template") {
-          await recordResult(sendTemplate(to, template, sendOptions));
-        } else if (template) {
-          await recordResult(
-            sendText(to, template.text, { ...sendOptions, ...quotedOption(replyQuoteToken) }),
-          );
+      if (templateMessage) {
+        if (templateMessage.type === "template") {
+          if (shouldBatchMixedPayload) {
+            pendingMessages.push(templateMessage);
+          } else {
+            await recordResult(sendTemplate(to, templateMessage, sendOptions));
+          }
+        } else if (templateMessage) {
+          if (shouldBatchMixedPayload) {
+            pendingMessages.push({
+              ...templateMessage,
+              ...quotedOption(replyQuoteToken),
+            });
+          } else {
+            await recordResult(
+              sendText(to, templateMessage.text, {
+                ...sendOptions,
+                ...quotedOption(replyQuoteToken),
+              }),
+            );
+          }
           replyQuoteToken = undefined;
         }
       }
 
       if (location) {
-        await recordResult(sendLocation(to, location, sendOptions));
+        if (shouldBatchMixedPayload && locationMessage) {
+          pendingMessages.push(locationMessage);
+        } else {
+          await recordResult(sendLocation(to, location, sendOptions));
+        }
       }
     }
 
@@ -255,16 +335,26 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
         const quoteToken = index === quotedIndex ? replyQuoteToken : undefined;
         if (message.type === "flex") {
           if (isLast && quickReply) {
-            await sendMessageBatch([{ ...message, quickReply }]);
+            if (shouldBatchMixedPayload) {
+              pendingMessages.push({ ...message, quickReply });
+            } else {
+              await sendMessageBatch([{ ...message, quickReply }]);
+            }
+          } else if (shouldBatchMixedPayload) {
+            pendingMessages.push(message);
           } else {
             await recordResult(sendFlex(to, message.altText, message.contents, sendOptions));
           }
         } else if (isLast && hasQuickReplies) {
           await sendTextWithQuickReply(message.text, quoteToken);
         } else {
-          await recordResult(
-            sendText(to, message.text, { ...sendOptions, ...quotedOption(quoteToken) }),
-          );
+          if (shouldBatchMixedPayload) {
+            pendingMessages.push({ ...message, ...quotedOption(quoteToken) });
+          } else {
+            await recordResult(
+              sendText(to, message.text, { ...sendOptions, ...quotedOption(quoteToken) }),
+            );
+          }
         }
       }
     } else {
@@ -316,6 +406,10 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
 
     if (mediaUrls.length > 0 && !shouldSendQuickRepliesInline && sendMediaAfterText) {
       await sendMediaMessages();
+    }
+
+    if (shouldBatchMixedPayload) {
+      await sendMessageBatch(pendingMessages);
     }
 
     const completedResult = acceptedResults.at(-1);
