@@ -78,6 +78,48 @@ describe("Decision replay", () => {
       input.cases.map((item: { id: string }) => item.id),
     );
   });
+  it.each([
+    ["missing", (outcome: Record<string, unknown>) => delete outcome.caseId],
+    ["null", (outcome: Record<string, unknown>) => Object.assign(outcome, { caseId: null })],
+    ["empty", (outcome: Record<string, unknown>) => Object.assign(outcome, { caseId: "" })],
+    ["wrong-type", (outcome: Record<string, unknown>) => Object.assign(outcome, { caseId: 7 })],
+  ])("retains identifiable rows for an outcome with a %s ID", (_label, corrupt) => {
+    const input = fixture();
+    corrupt(input.outcomes[1]);
+    const report = evaluate(input);
+    expect(report).toMatchObject({ pipelinePass: false, counts: { scheduled: 5 } });
+    expect(report.rows.map((row) => row.caseId)).toEqual(
+      input.cases.map((item: { id: string }) => item.id),
+    );
+    expect(report.rows[1]).toMatchObject({ caseId: "square", outcomeStatus: "missing" });
+    expect(report.issues).toContain("outcomes[1]: invalid record");
+  });
+  it("retains scheduled rows when a neighboring outcome is not an object", () => {
+    const input = fixture();
+    input.outcomes.splice(1, 0, null);
+    const report = evaluate(input);
+    expect(report).toMatchObject({ pipelinePass: false, counts: { scheduled: 5 } });
+    expect(report.rows.map((row) => row.caseId)).toEqual(
+      input.cases.map((item: { id: string }) => item.id),
+    );
+    expect(report.rows[1]).toMatchObject({ caseId: "square", outcomeStatus: "ok" });
+    expect(report.rows[2]).toMatchObject({ caseId: "mark", outcomeStatus: "ok" });
+    expect(report.rows[1]?.outcome).toEqual(input.outcomes[2]);
+    expect(report.issues).toContain("outcomes[1]: invalid record");
+  });
+  it.each([null, {}, { id: null }, { id: "" }, { id: 7 }])(
+    "retains valid cases beside malformed case %j",
+    (invalid) => {
+      const input = fixture();
+      const original = evaluate(input);
+      input.cases.splice(1, 0, invalid);
+      const report = evaluate(input);
+      expect(report.pipelinePass).toBe(false);
+      expect(report.rows).toEqual(original.rows);
+      expect(report.counts).toEqual(original.counts);
+      expect(report.issues).toContain("cases[1]: invalid record");
+    },
+  );
   it("requires every question reference in a multi-question case", () => {
     const input = fixture();
     Object.assign(input.cases[0].batch.questions, input.cases[1].batch.questions);

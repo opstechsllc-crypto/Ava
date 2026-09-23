@@ -109,11 +109,12 @@ const outcome = z.union([okOutcome, executionOutcome]);
 const artifact = obj({
   version: z.literal(1),
   fixtureId: nonEmpty,
-  cases: z.array(obj({ id: nonEmpty })),
-  outcomes: z.array(obj({ caseId: nonEmpty })),
+  cases: z.array(z.unknown()),
+  outcomes: z.array(z.unknown()),
 });
+const caseRecord = obj({ id: nonEmpty });
+const outcomeRecord = obj({ caseId: nonEmpty });
 
-type Artifact = z.infer<typeof artifact>;
 type Reference = z.infer<typeof referenceSchema>;
 type Outcome = z.infer<typeof outcome>;
 type Expectation = z.infer<typeof expectation>;
@@ -225,16 +226,19 @@ function referenceMatches(batch: DecisionBatch, reference: Reference | undefined
   );
 }
 
-function relationalIssues(value: Artifact): string[] {
-  const caseIds = new Set(value.cases.map((item) => item.id));
-  const outcomeIds = new Set(value.outcomes.map((item) => item.caseId));
+function relationalIssues(
+  cases: Array<{ id: string }>,
+  outcomes: Array<{ caseId: string }>,
+): string[] {
+  const caseIds = new Set(cases.map((item) => item.id));
+  const outcomeIds = new Set(outcomes.map((item) => item.caseId));
   const issues = [...outcomeIds]
     .filter((id) => !caseIds.has(id))
     .map((id) => `outcome references unknown case ${id}`);
-  if (caseIds.size !== value.cases.length) {
+  if (caseIds.size !== cases.length) {
     issues.push("duplicate case IDs");
   }
-  if (outcomeIds.size !== value.outcomes.length) {
+  if (outcomeIds.size !== outcomes.length) {
     issues.push("duplicate outcome case IDs");
   }
   return issues;
@@ -271,25 +275,55 @@ function evaluateDecisionEvaluationArtifact(input: unknown): DecisionEvaluationR
     return summarize("invalid", ["decision evaluation artifact failed schema validation"], []);
   }
   const value = parsed.data;
-  const issues = relationalIssues(value);
-  if (!value.cases.length) {
+  const issues: string[] = [];
+  const cases: Array<{ raw: unknown; value: z.infer<typeof caseRecord> }> = [];
+  for (const [index, raw] of value.cases.entries()) {
+    const checked = caseRecord.safeParse(raw);
+    if (!checked.success) {
+      issues.push(`cases[${index}]: invalid record`);
+      continue;
+    }
+    cases.push({ raw, value: checked.data });
+  }
+  const outcomes: Array<{ raw: unknown; value: z.infer<typeof outcomeRecord> }> = [];
+  for (const [index, raw] of value.outcomes.entries()) {
+    const checked = outcomeRecord.safeParse(raw);
+    if (!checked.success) {
+      issues.push(`outcomes[${index}]: invalid record`);
+      continue;
+    }
+    outcomes.push({ raw, value: checked.data });
+  }
+  issues.push(
+    ...relationalIssues(
+      cases.map((item) => item.value),
+      outcomes.map((item) => item.value),
+    ),
+  );
+  if (!cases.length) {
     issues.push("fixture cases must not be empty");
   }
-  const outcomes = new Map(value.outcomes.map((item) => [item.caseId, item]));
+  const outcomesByCaseId = new Map(outcomes.map((item) => [item.value.caseId, item]));
   const rows: Row[] = [];
-  for (const item of value.cases) {
-    const captured = outcomes.get(item.id);
-    const raw = captured ?? { caseId: item.id, status: "missing", reason: "no captured outcome" };
-    const checkedBatch = batchSchema.safeParse(item.batch);
+  for (const item of cases) {
+    const captured = outcomesByCaseId.get(item.value.id);
+    const raw = captured?.raw ?? {
+      caseId: item.value.id,
+      status: "missing",
+      reason: "no captured outcome",
+    };
+    const checkedBatch = batchSchema.safeParse(item.value.batch);
     const checkedReference =
-      item.reference === undefined ? undefined : referenceSchema.safeParse(item.reference);
+      item.value.reference === undefined
+        ? undefined
+        : referenceSchema.safeParse(item.value.reference);
     const checkedOutcome = outcome.safeParse(raw);
     const typedBatch = checkedBatch.success ? checkedBatch.data : undefined;
     const refValue = checkedReference?.success ? checkedReference.data : undefined;
     const execution = checkedOutcome.success ? checkedOutcome.data : undefined;
-    const validGroupId = nonEmpty.optional().safeParse(item.groupId).success;
+    const validGroupId = nonEmpty.optional().safeParse(item.value.groupId).success;
     const validReference =
-      item.reference === undefined ||
+      item.value.reference === undefined ||
       Boolean(checkedReference?.success && typedBatch && referenceMatches(typedBatch, refValue));
     const validCase = Boolean(typedBatch && validGroupId && validReference);
     const invalidResult =
@@ -297,10 +331,12 @@ function evaluateDecisionEvaluationArtifact(input: unknown): DecisionEvaluationR
       (execution.status === "ok" && (!typedBatch || !resultMatches(typedBatch, execution.result)));
     const outcomeStatus = invalidResult ? "invalid-response" : execution!.status;
     if (!validCase) {
-      issues.push(`case ${item.id}: invalid fixture or missing expectation for every question`);
+      issues.push(
+        `case ${item.value.id}: invalid fixture or missing expectation for every question`,
+      );
     }
     if (outcomeStatus !== "ok") {
-      issues.push(`case ${item.id}: outcome status=${outcomeStatus}`);
+      issues.push(`case ${item.value.id}: outcome status=${outcomeStatus}`);
     }
     let agreement: Row["agreement"] = "not-scored";
     if (
@@ -317,11 +353,11 @@ function evaluateDecisionEvaluationArtifact(input: unknown): DecisionEvaluationR
         : "disagree";
     }
     rows.push({
-      caseId: item.id,
-      case: item,
+      caseId: item.value.id,
+      case: item.raw,
       outcomeStatus,
       referenceStatus:
-        refValue?.status ?? (item.reference === undefined ? "missing" : "unscorable"),
+        refValue?.status ?? (item.value.reference === undefined ? "missing" : "unscorable"),
       outcome: raw,
       scored: agreement !== "not-scored",
       agreement,
