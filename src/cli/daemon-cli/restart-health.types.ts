@@ -10,6 +10,7 @@ export type GatewayRestartWaitOutcome =
   | "build-id-mismatch"
   | "stale-pids"
   | "stopped-free"
+  | "port-held-foreign"
   | "timeout";
 
 export type GatewayRestartSnapshot = {
