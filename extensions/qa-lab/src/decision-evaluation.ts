@@ -2,11 +2,11 @@ import type {
   DecisionAnswer,
   DecisionBatch,
   DecisionBatchResult,
+  JsonValue,
 } from "openclaw/plugin-sdk/decisions";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { z } from "zod";
 
-const jsonValue = z.json();
 const probability = z.number().finite().min(0).max(1);
 const nonEmpty = z.string().min(1);
 const obj = <T extends z.ZodRawShape>(shape: T) => z.object(shape).passthrough();
@@ -20,6 +20,16 @@ const ownMap = <T extends z.ZodType>(value: T, key = z.string()) =>
       (name) => key.safeParse(name).success && value.safeParse(input[name]).success,
     );
   });
+const jsonValue: z.ZodType<JsonValue> = z.lazy(() =>
+  z.union([
+    z.null(),
+    z.boolean(),
+    z.number().finite(),
+    z.string(),
+    z.array(jsonValue),
+    ownMap(jsonValue),
+  ]),
+);
 const entry = z.union([z.string(), z.null(), z.array(jsonValue), ownMap(jsonValue)]);
 const provenance = obj({
   providerId: nonEmpty,
@@ -303,11 +313,20 @@ function evaluateDecisionEvaluationArtifact(input: unknown): DecisionEvaluationR
   if (!cases.length) {
     issues.push("fixture cases must not be empty");
   }
-  const outcomesByCaseId = new Map(outcomes.map((item) => [item.value.caseId, item]));
+  const caseCounts = new Map<string, number>();
+  for (const item of cases) {
+    caseCounts.set(item.value.id, (caseCounts.get(item.value.id) ?? 0) + 1);
+  }
+  const outcomesByCaseId = new Map<string, unknown[]>();
+  for (const item of outcomes) {
+    const captured = outcomesByCaseId.get(item.value.caseId) ?? [];
+    captured.push(item.raw);
+    outcomesByCaseId.set(item.value.caseId, captured);
+  }
   const rows: Row[] = [];
   for (const item of cases) {
     const captured = outcomesByCaseId.get(item.value.id);
-    const raw = captured?.raw ?? {
+    const raw = (captured?.length === 1 ? captured[0] : captured) ?? {
       caseId: item.value.id,
       status: "missing",
       reason: "no captured outcome",
@@ -327,6 +346,7 @@ function evaluateDecisionEvaluationArtifact(input: unknown): DecisionEvaluationR
       Boolean(checkedReference?.success && typedBatch && referenceMatches(typedBatch, refValue));
     const validCase = Boolean(typedBatch && validGroupId && validReference);
     const invalidResult =
+      caseCounts.get(item.value.id) !== 1 ||
       !execution ||
       (execution.status === "ok" && (!typedBatch || !resultMatches(typedBatch, execution.result)));
     const outcomeStatus = invalidResult ? "invalid-response" : execution!.status;

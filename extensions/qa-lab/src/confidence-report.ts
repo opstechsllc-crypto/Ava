@@ -6,6 +6,14 @@ import {
   isRecord,
   normalizeOptionalString as readString,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
+import {
+  isQaConfidenceVerdict,
+  readVerdict,
+  unknownLaneEvaluation,
+  type QaConfidenceLaneEvaluation,
+  type QaConfidenceLaneStatus,
+  type QaConfidenceVerdict,
+} from "./confidence-lane-evaluation.js";
 import { evaluateDecisionEvaluationSummary } from "./decision-evaluation.js";
 import type { DecisionEvaluationReport } from "./decision-evaluation.js";
 import {
@@ -18,17 +26,7 @@ import {
   findQaSuiteSummaryCompletionError,
 } from "./suite-summary.js";
 
-const QA_CONFIDENCE_VERDICTS = [
-  "pass",
-  "product-bug",
-  "qa-harness-bug",
-  "fixture-bug",
-  "optional-gap",
-  "mock-limitation",
-  "environment-blocked",
-] as const;
-
-export type QaConfidenceVerdict = (typeof QA_CONFIDENCE_VERDICTS)[number];
+export type { QaConfidenceVerdict } from "./confidence-lane-evaluation.js";
 
 const QA_CONFIDENCE_LANE_KINDS = [
   "qa-suite-summary",
@@ -49,8 +47,6 @@ type QaConfidenceManifest = {
   profile: string;
   lanes: QaConfidenceManifestLane[];
 };
-
-type QaConfidenceLaneStatus = "pass" | "fail" | "blocked" | "missing" | "unknown";
 
 type QaConfidenceLaneResult = ReturnType<typeof baseLaneResult> & {
   artifactPath: string;
@@ -124,29 +120,12 @@ function collectGatewayLogSentinels(value: unknown): GatewayLogSentinelFinding[]
   return findings;
 }
 
-function isQaConfidenceVerdict(value: string): value is QaConfidenceVerdict {
-  return QA_CONFIDENCE_VERDICTS.some((verdict) => verdict === value);
-}
-
 function readRequiredString(record: Record<string, unknown>, key: string): string {
   const value = readString(record[key]);
   if (!value) {
     throw new Error(`confidence manifest lane missing ${key}`);
   }
   return value;
-}
-
-function readVerdict(value: unknown, key: string): QaConfidenceVerdict | undefined {
-  const text = readString(value);
-  if (!text) {
-    return undefined;
-  }
-  if (!isQaConfidenceVerdict(text)) {
-    throw new Error(
-      `confidence manifest ${key} must be one of ${QA_CONFIDENCE_VERDICTS.join(", ")}`,
-    );
-  }
-  return text;
 }
 
 function readLaneKind(value: unknown): QaConfidenceLaneKind {
@@ -251,20 +230,6 @@ export async function readQaConfidenceManifestFile(
     );
   }
   return normalizeQaConfidenceManifest(payload);
-}
-
-type QaConfidenceLaneEvaluation = {
-  passed: boolean;
-  details: string;
-  skippedCount?: number;
-  status?: QaConfidenceLaneStatus;
-  verdict?: QaConfidenceVerdict;
-  decisionEvaluation?: DecisionEvaluationReport;
-};
-
-// Explicit unknown evidence bypasses failureVerdict; status-less failures are classified separately.
-function unknownLaneEvaluation(details: string): QaConfidenceLaneEvaluation {
-  return { passed: false, status: "unknown", details };
 }
 
 function evaluateQaSuiteSummary(payload: unknown): QaConfidenceLaneEvaluation {

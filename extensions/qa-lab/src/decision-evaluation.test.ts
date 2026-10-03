@@ -94,6 +94,70 @@ describe("Decision replay", () => {
     expect(report.rows[1]).toMatchObject({ caseId: "square", outcomeStatus: "missing" });
     expect(report.issues).toContain("outcomes[1]: invalid record");
   });
+  it.each([false, true])(
+    "quarantines duplicate captures in either order (reverse=%s)",
+    (reverse) => {
+      const input = fixture();
+      const captured = [
+        { caseId: "color", status: "unavailable", reason: "captured failure" },
+        input.outcomes[0],
+      ];
+      if (reverse) {
+        captured.reverse();
+      }
+      input.outcomes.splice(0, 1, ...captured);
+      const report = evaluate(input);
+      expect(report).toMatchObject({
+        pipelinePass: false,
+        counts: { scheduled: 5, scored: 2, unscored: 3 },
+      });
+      expect(report.rows[0]).toMatchObject({
+        outcomeStatus: "invalid-response",
+        scored: false,
+        agreement: "not-scored",
+      });
+      expect(report.rows[0]?.outcome).toEqual(captured);
+      expect(report.rows[1]?.outcome).toEqual(input.outcomes[2]);
+    },
+  );
+  it("does not reuse one capture to score duplicate cases", () => {
+    const input = fixture();
+    input.cases.push(structuredClone(input.cases[0]));
+    const report = evaluate(input);
+    expect(report).toMatchObject({
+      pipelinePass: false,
+      counts: { scheduled: 6, scored: 2, unscored: 4 },
+    });
+    for (const index of [0, 5]) {
+      expect(report.rows[index]).toMatchObject({
+        case: input.cases[index],
+        outcome: input.outcomes[0],
+        scored: false,
+        agreement: "not-scored",
+        outcomeStatus: "invalid-response",
+      });
+    }
+  });
+  it.each(['{"nested":{"__proto__":1e309}}', '{"nested":[{"__proto__":1e309}]}'])(
+    "rejects nonfinite nested prototype-key data: %s",
+    (state) => {
+      const input = fixture();
+      input.cases[0].batch.state = JSON.parse(state);
+      expect(evaluate(input)).toMatchObject({
+        pipelinePass: false,
+        counts: { scheduled: 5, scored: 2 },
+        rows: [{ scored: false, agreement: "not-scored" }, {}, {}, {}, {}],
+      });
+    },
+  );
+  it("preserves finite nested prototype-key data", () => {
+    const input = fixture();
+    input.cases[0].batch.state = JSON.parse('{"nested":[{"__proto__":0.25}]}');
+    const report = evaluate(input);
+    expect(report.pipelinePass).toBe(true);
+    expect(report.rows[0]?.case).toEqual(input.cases[0]);
+    expect(report.counts.scored).toBe(3);
+  });
   it("retains scheduled rows when a neighboring outcome is not an object", () => {
     const input = fixture();
     input.outcomes.splice(1, 0, null);

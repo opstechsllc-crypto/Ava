@@ -141,6 +141,9 @@ does not establish validated correctness, calibrated confidence, or permission
 to activate a model. Group IDs retain repeat/permutation relationships; counts
 are descriptive, not independent statistical samples.
 
+Duplicate case or outcome IDs fail integrity. Affected rows remain unscored,
+and duplicate captured outcomes are retained together rather than selecting one.
+
 Markdown summarizes counts; JSON reports preserve every row, typed answers, probabilities, optional confidence, and
 recorded provenance without renormalizing distributions or inventing missing
 confidence. Replay is deterministic for the same inputs and build; the enclosing
