@@ -75,6 +75,7 @@ export const databaseWorkerExtensionTestFiles = [
   "extensions/nostr/src/nostr-bus.inbound.test.ts",
   "extensions/nostr/src/nostr-bus.outbound.test.ts",
   "extensions/nostr/src/nostr-ingress.test.ts",
+  "extensions/signal/src/monitor.shutdown-bound.test.ts",
   "extensions/signal/src/monitor.tool-result.autostart.test.ts",
   "extensions/signal/src/monitor.tool-result.pairs-uuid-only-senders-uuid-allowlist-entry.test.ts",
   "extensions/signal/src/monitor.tool-result.sends-tool-summaries-responseprefix.test.ts",
