@@ -15,9 +15,10 @@ import { subtitleForRoute, titleForRoute } from "../../app-navigation.ts";
 import { pathForRoute } from "../../app-route-paths.ts";
 import { applicationContext, type ApplicationContext } from "../../app/context.ts";
 import { hasNativeBrowserBridge } from "../../app/native-browser-host.ts";
-import { hasOperatorAdminAccess, hasOperatorWriteAccess } from "../../app/operator-access.ts";
+import { hasOperatorAdminAccess } from "../../app/operator-access.ts";
 import { isBrowserPanelAvailable } from "../../app/panel-availability.ts";
 import { selectThemeSettings } from "../../app/server-prefs-intent.ts";
+import { canSyncAppearancePreference } from "../../app/server-prefs-profile-runtime.ts";
 import { isAppearancePref, type ResettableServerUiPrefKey } from "../../app/server-prefs-state.ts";
 import { resetServerUiPref, resolveServerUiPrefState } from "../../app/server-prefs.ts";
 import {
@@ -86,6 +87,7 @@ import {
   buildSessionObserverUtilityModelPatch,
 } from "./session-observer-settings.ts";
 import "./session-storage.ts";
+import { TabIconSettingsController } from "./tab-icon-settings-controller.ts";
 import "./talk-page.ts";
 import { renderUpdatesPage } from "./updates-page.ts";
 import {
@@ -239,6 +241,12 @@ export class ConfigPage extends OpenClawLightDomElement {
     camera: createMediaDeviceState(),
   };
   private cameraSelectionRequest = 0;
+  private readonly tabIconSettings = new TabIconSettingsController(this, {
+    getContext: () => this.context,
+    isActive: () => this.pageId === "appearance",
+    getPreference: () => this.settings.tabIcon,
+    setPreference: (tabIcon) => this.applySettings({ tabIcon }),
+  });
   @state() private formModes: Partial<Record<ConfigPageId, ConfigProps["formMode"]>> = {};
   @state() private selections: Partial<Record<ConfigPageId, ConfigSelection>> = {};
   @state() private customThemeImport = themeImport.INITIAL_CUSTOM_THEME_IMPORT_STATE;
@@ -397,6 +405,9 @@ export class ConfigPage extends OpenClawLightDomElement {
     .watchStore(() => this.context?.overlays)
     .watchStore(() => this.context?.config)
     .watchStore(() => this.context?.settingsAgentSelection)
+    .watchStore(() => (this.pageId === "appearance" ? this.context?.agentSelection : null))
+    .watchStore(() => (this.pageId === "appearance" ? this.context?.agents : null))
+    .watchStore(() => (this.pageId === "appearance" ? this.context?.agentIdentity : null))
     .watchStore(() => this.context?.nativeDeviceSettings ?? undefined)
     .watchStore(() => this.context?.nativeNotifications ?? undefined)
     .watchStore(() => this.context?.webPush)
@@ -708,7 +719,7 @@ export class ConfigPage extends OpenClawLightDomElement {
       this.context.gateway.connection.gatewayUrl,
       this.settings,
       {
-        canSync: this.serverUiPrefsCanSync(appearance ? key : undefined),
+        canSync: canSyncAppearancePreference(this.context, appearance ? key : undefined),
         profileId: appearance ? this.context.gateway.snapshot?.selfUser?.id : undefined,
       },
     );
@@ -721,22 +732,6 @@ export class ConfigPage extends OpenClawLightDomElement {
     } else {
       this.applySettings({ [key]: font });
     }
-  }
-
-  private serverUiPrefsCanSync(
-    key?: "theme" | "themeMode" | "accent" | "fontUi" | "fontChat",
-  ): boolean | null {
-    const runtimeConfig = this.context.runtimeConfig;
-    if (!runtimeConfig.state.connected) {
-      return null;
-    }
-    const gateway = this.context.gateway.snapshot;
-    if ((key === "fontUi" || key === "fontChat") && !gateway?.selfUser) {
-      return false;
-    }
-    return key && gateway?.selfUser
-      ? hasOperatorWriteAccess(gateway.hello?.auth ?? null)
-      : runtimeConfig.canPatch !== false;
   }
 
   private resetLocale() {
@@ -752,7 +747,7 @@ export class ConfigPage extends OpenClawLightDomElement {
     }
   }
 
-  private resetSyncedAppearancePref(key: Exclude<ResettableServerUiPrefKey, "locale">) {
+  private resetSyncedAppearancePref(key: Exclude<ResettableServerUiPrefKey, "locale" | "tabIcon">) {
     this.settings = resetServerUiPref(
       key,
       this.currentSyncedPref(key),
@@ -980,6 +975,7 @@ export class ConfigPage extends OpenClawLightDomElement {
       onImportCustomTheme: () => void this.importCustomTheme(),
       onClearCustomTheme: () => this.clearCustomTheme(),
       onOpenCustomThemeImport: () => this.customThemeImportOwner.open(),
+      ...this.tabIconSettings.props,
       textScale: this.settings.textScale ?? UI_APPEARANCE_DEFAULTS.textScale,
       textScaleOverridden: this.settings.textScale !== undefined,
       setTextScale: (value) =>
