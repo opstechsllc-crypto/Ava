@@ -72,7 +72,10 @@ import type {
 import { buildMessagingSection, resolveSilentReplyPromptMode } from "./system-prompt-messaging.js";
 import { buildRuntimeLine } from "./system-prompt-runtime.js";
 import { buildSkillsSection } from "./system-prompt-skills.js";
-import { buildSystemPromptToolLines } from "./system-prompt-tool-list.js";
+import {
+  buildSystemPromptToolLines,
+  resolveSystemPromptVisibleTools,
+} from "./system-prompt-tool-list.js";
 import type {
   PromptMode,
   SilentReplyPromptMode,
@@ -280,6 +283,11 @@ export function buildAgentSystemPrompt(params: {
   ownerDisplaySecret?: string;
   reasoningTagHint?: boolean;
   toolNames?: string[];
+  /**
+   * Transport prefix the runtime puts on `toolNames` when it exposes them to the
+   * model, such as Claude Code's `mcp__openclaw__`. Capability checks keep bare names.
+   */
+  toolNamePrefix?: string;
   /** Callable tool names used for capability guidance without listing them as visible tools. */
   capabilityToolNames?: string[];
   modelAliasLines?: string[];
@@ -352,15 +360,7 @@ export function buildAgentSystemPrompt(params: {
   const promptSurface = params.promptSurface ?? "openclaw_main";
   const sandboxedRuntime = params.sandboxInfo?.enabled === true;
   const acpSpawnRuntimeEnabled = acpEnabled && !sandboxedRuntime;
-  // Preserve first caller casing; sparse tool arrays skip absent entries.
-  const visibleTools = new Map<string, string>();
-  (params.toolNames ?? []).forEach((tool) => {
-    const name = tool.trim();
-    const normalized = name.toLowerCase();
-    if (normalized && !visibleTools.has(normalized)) {
-      visibleTools.set(normalized, name);
-    }
-  });
+  const visibleTools = resolveSystemPromptVisibleTools(params.toolNames, params.toolNamePrefix);
   const availableTools = new Set([
     ...visibleTools.keys(),
     ...normalizeStringEntriesLower(params.capabilityToolNames),
@@ -383,6 +383,7 @@ export function buildAgentSystemPrompt(params: {
     codeModeActive: params.codeModeActive,
     promptSurface,
     acpSpawnRuntimeEnabled,
+    toolNamePrefix: params.toolNamePrefix,
   });
   const toolSchemaDirectoryPrompt = params.toolSchemaDirectoryPrompt?.trim();
   const renderOpenClawToolWorkflowHints =
@@ -904,7 +905,7 @@ export function buildAgentSystemPrompt(params: {
           "## Assistant Output Directives",
           ...(sourceMessageToolOnly
             ? [
-                "- Visible source output: `message(action=send)`.",
+                `- Visible source output: \`${resolveToolName("message")}(action=send)\`.`,
                 "- Media paths = attachments, not prose. One: `media`; many: `attachments: [{media: ...}]`.",
                 "- Synthesized speech: `voiceText`; optional `voiceProvider`, `voiceId`; voice note: `asVoice`.",
                 "- No legacy `MEDIA:` here. Explicit native reply: `replyTo`.",
@@ -993,6 +994,7 @@ export function buildAgentSystemPrompt(params: {
       requireExplicitMessageTarget: params.requireExplicitMessageTarget,
       silentReplyPromptMode,
       delegationSectionRenders: subagentDelegationPreferenceSection.length > 0,
+      messageToolName: resolveToolName("message"),
     }),
     // Capability-gated reply guidance stays below the cache boundary so channel changes
     // cannot alter the byte-identical stable prefix shared across sessions.

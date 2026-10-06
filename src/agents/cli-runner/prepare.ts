@@ -4,10 +4,7 @@ import {
 } from "@openclaw/ai/internal/shared";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
-import {
-  buildHarnessVisibleReplyGuidance,
-  messageToolOwnsVisibleReply,
-} from "../../auto-reply/source-reply-delivery-mode.js";
+import { messageToolOwnsVisibleReply } from "../../auto-reply/source-reply-delivery-mode.js";
 import { getRuntimeConfig } from "../../config/config.js";
 import { canonicalizeMainSessionAlias } from "../../config/sessions/main-session.js";
 import { runWithSessionTranscriptReadFence } from "../../config/sessions/session-transcript-read-fence.js";
@@ -150,6 +147,7 @@ import { detectNodeClaudePlacement, resolveClaudeCliContextModelId } from "./pre
 import * as mcp from "./prepare-mcp.js";
 import { resolveCliRuntimeToolPolicy } from "./prepare-tool-policy.js";
 import {
+  buildCliTurnReplyGuidance,
   composeCliPromptContext,
   prependCliSessionDriftUserContext,
   prepareCliSystemPrompt,
@@ -1574,6 +1572,7 @@ async function prepareCliRunContextWithinReadFence(
             sourcePath: openClawReferences.sourcePath ?? undefined,
             skillsPrompt: systemPromptSkillsPrompt,
             tools: promptTools,
+            bundleMcpMode: backendResolved.bundleMcpMode,
             contextFiles,
             bootstrapMode,
             bootstrapTruncationNotice,
@@ -1622,14 +1621,13 @@ async function prepareCliRunContextWithinReadFence(
             allowRawTranscriptReseed,
             rawTranscriptReseedReason,
           });
-    const effectiveReplyGuidance =
-      skipsTurnPreparation || params.isolatedCompletion
-        ? undefined
-        : buildHarnessVisibleReplyGuidance({
-            sourceReplyDeliveryMode: params.sourceReplyDeliveryMode,
-            messageToolAvailable,
-            requireExplicitMessageTarget,
-          });
+    const effectiveReplyGuidance = skipsTurnPreparation
+      ? undefined
+      : buildCliTurnReplyGuidance(params, {
+          messageToolAvailable,
+          requireExplicitMessageTarget,
+          bundleMcpMode: backendResolved.bundleMcpMode,
+        });
     const finalizedTranscriptPrompt =
       (params.finalizePromptForResolvedTools ||
         sessionPromptContext?.durableContext ||
