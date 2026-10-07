@@ -53,6 +53,7 @@ import {
 import {
   log,
   resolvePromptCacheKey,
+  resolveChatTemplateReasoningEffort,
   sortTransportToolsByName,
   type OpenAIModeModel,
 } from "./openai-transport-shared.js";
@@ -519,7 +520,11 @@ export function buildOpenAICompletionsRequest(
     if (model.reasoning) {
       const enabled = thinkingEnabled ?? false;
       if (compat.thinkingFormat === "qwen-chat-template") {
-        params.chat_template_kwargs = { enable_thinking: enabled };
+        const chatTemplateReasoningEffort = resolveChatTemplateReasoningEffort(model, reasoning);
+        params.chat_template_kwargs = {
+          enable_thinking: enabled,
+          ...(chatTemplateReasoningEffort ? { reasoning_effort: chatTemplateReasoningEffort } : {}),
+        };
         suppressScalarEffort = true;
       } else if (compat.thinkingFormat === "qwen") {
         params.enable_thinking = enabled;
