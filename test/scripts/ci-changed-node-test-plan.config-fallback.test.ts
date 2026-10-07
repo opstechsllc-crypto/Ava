@@ -11,7 +11,6 @@ import {
   hasCoreExtensionImpact,
 } from "../../scripts/lib/ci-changed-node-test-plan.mts";
 import { encodeNodeTestGroups } from "../../scripts/lib/ci-node-test-groups-codec.mts";
-import { createNodeTestShardBundles } from "../../scripts/lib/ci-node-test-plan.mts";
 import { isCiProofTestFile } from "../../scripts/lib/ci-proof-test-inventory.mts";
 import { refitTestTimings } from "../../scripts/lib/ci-test-timings-refit.mts";
 import * as testTimings from "../../scripts/lib/ci-test-timings.mts";
@@ -627,22 +626,23 @@ describe("CI changed Node test plan", () => {
     expect(createChangedExtensionFallbackShards(["docs/ci.md"])).toEqual([]);
   });
 
-  it("keeps core-impact extension fallback under the PR matrix cap", () => {
+  it("keeps core-impact extension owner plan under the PR matrix cap", () => {
     const changedPaths = ["src/config/types.ts"];
-    const compactNodeRows = createNodeTestShardBundles({
-      changedPaths,
-      compact: true,
-      compactMode: "pull-request",
-      includeReleaseOnlyPluginShards: false,
-      runnerBackend: "github",
-    }).filter((shard) => !shard.requiresDist);
-    const fallbackRows = createChangedExtensionFallbackShards(changedPaths).filter(
-      (shard) => !shard.requiresDist,
+    const shards = expectDefined(
+      createChangedNodeTestShards(changedPaths, {
+        compactNodeJobCap: 130,
+        includeReleaseOnlyRuntimeTests: false,
+        includePrExemptRuntimeTests: false,
+        runnerBackend: "github",
+      }),
+      "core-impact changed-test owner plan",
     );
 
     expect(hasCoreExtensionImpact(changedPaths), "fixture should exercise core impact").toBe(true);
-    expect(fallbackRows.length).toBeGreaterThan(0);
-    expect(compactNodeRows.length + fallbackRows.length).toBeLessThanOrEqual(130);
+    expect(
+      shards.some((shard) => shard.checkName.startsWith("checks-node-changed-extensions")),
+    ).toBe(true);
+    expect(shards.filter((shard) => !shard.requiresDist).length).toBeLessThanOrEqual(130);
   });
 
   it.each([
