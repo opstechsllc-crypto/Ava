@@ -1,12 +1,21 @@
 import "./service-definition-backup.mocks.test-support.js";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
+import path from "node:path";
 import { PassThrough } from "node:stream";
 import { DOMParser } from "linkedom";
 import { expect, it, vi } from "vitest";
 import { CommandProcessCleanupError } from "../process/exec-result.js";
 import * as pidAlive from "../shared/pid-alive.js";
 import { installLaunchAgent } from "./launchd-install.js";
-import { restoreGatewayServiceDefinitionBackup } from "./service-definition-backup.js";
+import * as scheduledControl from "./schtasks-control.js";
+import * as scheduledRuntime from "./schtasks-runtime.js";
+import * as scheduledProbe from "./schtasks-state-probe.js";
+import {
+  captureGatewayServiceDefinitionBackup,
+  restoreGatewayServiceDefinitionBackup,
+  verifyGatewayServiceDefinitionBackup,
+} from "./service-definition-backup.js";
 import { fixture, native, readRetainedReceipt } from "./service-definition-backup.test-support.js";
 import { withGatewayServiceOperationLock } from "./service-operation-lock.js";
 import {
@@ -44,6 +53,36 @@ function taskReference(xml: string): string {
   }
   return command;
 }
+
+it("checkpoints observed Enabled policy in the legacy receipt format for standalone rollback", async () => {
+  const f = await fixture("win32");
+  const original = f.originalTask.replace("\n    <Enabled>true</Enabled>", "");
+  f.setTask(original);
+  const capture = await captureGatewayServiceDefinitionBackup(f);
+  const recorded = await readRetainedReceipt(capture.backupPaths);
+  const disabled = original.replace(
+    "</StopIfGoingOnBatteries>",
+    "</StopIfGoingOnBatteries>\n    <Enabled>false</Enabled>",
+  );
+  f.setTask(disabled);
+  await capture.hooks.beforeWrite();
+  const finished = await capture.finish();
+  await expect(
+    verifyGatewayServiceDefinitionBackup({ ...f, receipt: finished }),
+  ).resolves.toBeUndefined();
+  expect(finished.task?.afterPolicySha256).toBe(
+    createHash("sha256").update(disabled).digest("hex"),
+  );
+  expect(finished.task?.afterPolicySha256).not.toBe(recorded.task?.afterPolicySha256);
+  expect(await readRetainedReceipt(capture.backupPaths)).toEqual(finished);
+  await expect(capture.compensate()).resolves.toBe(false);
+  expect(native.task.mock.calls.some(([args]) => args[0] === "/Create")).toBe(false);
+  expect(f.task()).toBe(disabled);
+  const foreign = disabled.replace("<Count>0</Count>", "<Count>7</Count>");
+  f.setTask(foreign);
+  await expect(capture.hooks.beforeWrite()).rejects.toThrow("Scheduled Task changed");
+  expect(f.task()).toBe(foreign);
+});
 
 it.each(
   [
@@ -483,3 +522,112 @@ it("preserves typed pre-publication authority failure during central inspection"
   expect(await readServiceFileState(f.sourcePath)).toEqual(before);
   expect(await fs.readFile(f.sourcePath)).toEqual(f.original);
 });
+
+it.each(
+  ["\n", "\r\n", "\r\r\n"].flatMap((newline) => [
+    { running: false, phase: "publication", newline, ending: JSON.stringify(newline) },
+    { running: true, phase: "publication", newline, ending: JSON.stringify(newline) },
+    { running: true, phase: "activation", newline, ending: JSON.stringify(newline) },
+  ]),
+)(
+  "preserves original Windows runtime liveness after $phase failure (running=$running, newline=$ending)",
+  async ({ running, phase, newline }) => {
+    const f = await fixture("win32");
+    // Native Scheduler omits default true and inserts false at this schema position.
+    // Keep this independent from the product's Settings.Enabled normalization.
+    const exported = (xml: string, enabled: boolean) =>
+      xml
+        .replace(/\r*\n/gu, newline)
+        .replace(/(<Settings>)([\s\S]*?)(<\/Settings>)/u, (_match, open, body: string, close) => {
+          const withoutEnabled = body.startsWith("<Enabled>")
+            ? body.replace(/^<Enabled>(true|false)<\/Enabled>/u, "")
+            : body.replace(/^[ \t]*<Enabled>(true|false)<\/Enabled>\r*\n/gmu, "");
+          return `${open}${enabled ? withoutEnabled : withoutEnabled.replace("</StopIfGoingOnBatteries>", `</StopIfGoingOnBatteries>${newline}    <Enabled>false</Enabled>`)}${close}`;
+        });
+    const originalTask = exported(f.originalTask.replaceAll("\n", newline), true);
+    f.setTask(originalTask);
+    native.taskState = running ? 4 : 3;
+    let enabled = true;
+    vi.spyOn(scheduledProbe, "probeScheduledTaskState").mockImplementation(() => ({
+      status: "found",
+      state: native.taskState,
+      enabled,
+    }));
+    const stop = vi
+      .spyOn(scheduledControl, "stopRegisteredScheduledTask")
+      .mockImplementation(async (params) => {
+        await params.beforeMutation?.();
+        native.taskState = 3;
+        params.onProcessStopped?.();
+        params.onEndMutation?.();
+        return false;
+      });
+    vi.spyOn(scheduledRuntime, "resolveFallbackRuntime").mockImplementation(async () => ({
+      status: native.taskState === 4 ? "running" : "stopped",
+    }));
+    vi.spyOn(scheduledRuntime, "waitForScheduledTaskRunningEvidence").mockImplementation(
+      async () => native.taskState === 4,
+    );
+    const execute = native.task.getMockImplementation()!;
+    native.task.mockImplementation(async (args: string[]) => {
+      if (args.includes("/DISABLE") || args.includes("/ENABLE")) {
+        enabled = args.includes("/ENABLE");
+        f.setTask(exported(f.task(), enabled));
+      }
+      const result = await execute(args);
+      if (args[0] === "/Create") {
+        f.setTask(exported(f.task(), enabled));
+      }
+      return result;
+    });
+    const rename = fs.rename.bind(fs);
+    let rejected = false;
+    vi.spyOn(fs, "rename").mockImplementation(async (source, target) => {
+      if (target === f.sourcePath) {
+        // Both candidate publication and restoration must follow process settlement.
+        expect(native.taskState).toBe(3);
+        if (phase === "publication" && !rejected) {
+          rejected = true;
+          throw Object.assign(new Error("Injected native publication sharing violation"), {
+            code: "EPERM",
+          });
+        }
+      }
+      return rename(source, target);
+    });
+    await expect(
+      reconcileGatewayServiceDefinition({
+        env: f.env,
+        root: "/old",
+        command: f.command,
+        expectedCommand: f.command,
+        install: async (hooks) => {
+          await f.install(hooks);
+          expect(native.taskState).toBe(4);
+          rejected = true;
+          throw new Error("Injected native activation failure");
+        },
+        warn: () => {},
+      }),
+    ).rejects.toThrow(`Injected native ${phase}`);
+    expect(rejected).toBe(true);
+    expect(await fs.readFile(f.sourcePath)).toEqual(f.original);
+    expect(f.task()).toBe(originalTask);
+    expect(native.taskState).toBe(running ? 4 : 3);
+    expect(stop).toHaveBeenCalledTimes(running ? 1 : 0);
+    expect(native.task.mock.calls.filter(([args]) => args[0] === "/Run")).toHaveLength(
+      phase === "activation" ? 2 : running ? 1 : 0,
+    );
+    const retained = (await fs.readdir(path.dirname(f.sourcePath)))
+      .filter((file) => file.endsWith(".receipt.bak"))
+      .map((file) => path.join(path.dirname(f.sourcePath), file))
+      .filter((file) => !f.capture.backupPaths.includes(file));
+    expect(retained).toHaveLength(1);
+    await expect(
+      verifyGatewayServiceDefinitionBackup({ ...f, receipt: await readRetainedReceipt(retained) }),
+    ).resolves.toBeUndefined();
+    expect(native.task.mock.calls.filter(([args]) => args[0] === "/Create")).toHaveLength(
+      phase === "activation" ? 2 : 0,
+    );
+  },
+);

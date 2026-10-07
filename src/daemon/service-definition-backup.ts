@@ -14,12 +14,9 @@ import {
 } from "./launchd-service-files.js";
 import { stopLaunchAgent } from "./launchd-stop.js";
 import { assertNoSystemLaunchDaemonOwnership } from "./launchd-system.js";
-import {
-  readScheduledTaskDefinition,
-  restoreScheduledTaskDefinition,
-  setScheduledTaskXmlEnabled,
-} from "./schtasks-control.js";
+import { readScheduledTaskDefinition, restoreScheduledTaskDefinition } from "./schtasks-control.js";
 import { resolveTaskLauncherScriptPath, resolveTaskScriptPath } from "./schtasks-layout.js";
+import { matchesScheduledTaskDefinition, setScheduledTaskXmlEnabled } from "./schtasks-xml.js";
 import { auditScheduledTaskDefinition } from "./service-audit-schtasks.js";
 import type { ServiceDefinitionDrift } from "./service-audit-types.js";
 import {
@@ -50,10 +47,26 @@ type Context = {
   command: GatewayServiceCommandConfig;
   assertCurrent: () => void;
 };
+type LiveContext = Context & { taskReference?: { xml: string } };
 const backupPath = (file: string, id: string) => `${file}.reconcile-${id}.bak`;
 const taskBytes = (xml: string) =>
   Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(xml, "utf16le")]);
 const taskPolicy = (xml: string) => sha256Hex(setScheduledTaskXmlEnabled(xml, false));
+function matchesRecordedTaskPolicy(
+  params: LiveContext,
+  receipt: GatewayServiceDefinitionBackupReceipt,
+  xml: string,
+): boolean {
+  const recorded = receipt.task?.afterPolicySha256;
+  const reference = params.taskReference?.xml;
+  return (
+    recorded !== undefined &&
+    (taskPolicy(xml) === recorded ||
+      (reference !== undefined &&
+        taskPolicy(reference) === recorded &&
+        matchesScheduledTaskDefinition(xml, reference, true)))
+  );
+}
 const receiptPath = (receipt: GatewayServiceDefinitionBackupReceipt) =>
   `${receipt.files[0]!.sourcePath}.reconcile-${receipt.id}.receipt.bak`;
 
@@ -125,7 +138,7 @@ function assertInventory(params: Context, receipt: GatewayServiceDefinitionBacku
 }
 
 function mutationHooks(
-  params: Context,
+  params: LiveContext,
   receipt: GatewayServiceDefinitionBackupReceipt,
 ): GatewayServiceDefinitionTransactionHooks {
   const assertCurrent = () => {
@@ -151,6 +164,9 @@ function mutationHooks(
       );
     }
     receipt.task.afterPolicySha256 = taskPolicy(xml);
+    if (params.taskReference) {
+      params.taskReference.xml = xml;
+    }
     delete receipt.task.preparedXml;
     await checkpointReceipt(params, receipt);
   };
@@ -184,9 +200,21 @@ function mutationHooks(
       }
     }
     if (receipt.task) {
-      const current = taskPolicy(await readScheduledTaskDefinition(params.env));
+      const xml = await readScheduledTaskDefinition(params.env);
+      const observed = taskPolicy(xml);
+      // Keep the published receipt digest convention. Only this live, hash-bound
+      // reference can reconcile Scheduler's representation of an owned Enabled toggle.
+      const previous = matchesRecordedTaskPolicy(params, receipt, xml);
+      if (previous && observed !== receipt.task.afterPolicySha256) {
+        assertCurrent();
+        receipt.task.afterPolicySha256 = observed;
+        if (params.taskReference) {
+          params.taskReference.xml = xml;
+        }
+        await checkpointReceipt(params, receipt);
+        return beforeWrite(settlePrepared);
+      }
       if (settlePrepared && receipt.task.preparedXml) {
-        const previous = current === receipt.task.afterPolicySha256;
         receipt.task.recoveredPolicy = previous ? "previous" : "prepared";
         if (previous) {
           delete receipt.task.preparedXml;
@@ -196,7 +224,7 @@ function mutationHooks(
         }
         return beforeWrite(false);
       }
-      if (current !== receipt.task.afterPolicySha256) {
+      if (!previous) {
         throw new Error("SERVICE_DEFINITION_UNKNOWN: Scheduled Task changed.");
       }
     }
@@ -261,6 +289,11 @@ export async function captureGatewayServiceDefinitionBackup(
   params: Context & { inspect?: () => Promise<void> },
 ) {
   params.assertCurrent();
+  const live: LiveContext = {
+    env: params.env,
+    command: params.command,
+    assertCurrent: params.assertCurrent,
+  };
   const paths = definitionFiles(params);
   const receipt: GatewayServiceDefinitionBackupReceipt = {
     id: randomUUID(),
@@ -292,6 +325,7 @@ export async function captureGatewayServiceDefinitionBackup(
   );
   if (process.platform === "win32") {
     const originalXml = await readScheduledTaskDefinition(params.env);
+    live.taskReference = { xml: originalXml };
     const contents = taskBytes(originalXml);
     originals.push({ sourcePath: `${paths[0]}.task.xml`, contents });
     receipt.task = {
@@ -299,7 +333,7 @@ export async function captureGatewayServiceDefinitionBackup(
       afterPolicySha256: taskPolicy(originalXml),
     };
   }
-  const hooks = mutationHooks(params, receipt);
+  const hooks = mutationHooks(live, receipt);
   // Bind audit facts to these bytes before any backup or installer publication.
   await params.inspect?.();
   await hooks.beforeWrite();
@@ -322,23 +356,26 @@ export async function captureGatewayServiceDefinitionBackup(
       return structuredClone(receipt);
     },
     compensate: async (): Promise<boolean> => {
-      const prepared = await prepareGatewayServiceDefinitionRestore({ ...params, receipt });
+      const prepared = await prepareGatewayServiceDefinitionRestore({ ...live, receipt });
       const changed =
         prepared.receipt.files.some((file) => !isDeepStrictEqual(file.before, file.after)) ||
         (prepared.task !== null &&
-          prepared.receipt.task?.afterPolicySha256 !==
-            taskPolicy(prepared.task.subarray(2).toString("utf16le")));
-      if (!changed) {
-        return false;
+          !matchesRecordedTaskPolicy(
+            live,
+            prepared.receipt,
+            prepared.task.subarray(2).toString("utf16le"),
+          ));
+      if (changed) {
+        await restorePreparedGatewayServiceDefinitionBackup(live, prepared);
       }
-      await restorePreparedGatewayServiceDefinitionBackup(params, prepared);
-      return true;
+      Object.assign(receipt, prepared.receipt);
+      return changed;
     },
   };
 }
 
 async function prepareGatewayServiceDefinitionRestore(
-  params: Context & { receipt: GatewayServiceDefinitionBackupReceipt },
+  params: LiveContext & { receipt: GatewayServiceDefinitionBackupReceipt },
 ) {
   const receipt = GatewayServiceDefinitionBackupReceiptSchema.parse(params.receipt);
   assertInventory(params, receipt);
@@ -391,7 +428,7 @@ export async function restoreGatewayServiceDefinitionBackup(
 }
 
 async function restorePreparedGatewayServiceDefinitionBackup(
-  params: Context,
+  params: LiveContext,
   {
     receipt,
     hooks,
@@ -462,7 +499,7 @@ async function restorePreparedGatewayServiceDefinitionBackup(
         await reloadSystemdUserManager(params.env, undefined, hooks.assertCurrent);
         await hooks.beforeWrite();
       }
-      if (file === primary && taskXml && receipt.task!.afterPolicySha256 !== taskPolicy(taskXml)) {
+      if (file === primary && taskXml && !matchesRecordedTaskPolicy(params, receipt, taskXml)) {
         try {
           await restoreScheduledTaskDefinition({
             env: params.env,
