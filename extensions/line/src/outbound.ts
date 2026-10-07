@@ -185,9 +185,36 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
             if (recoveryErrors.length === 0) {
               return;
             }
-            const acceptedRecoveryError = recoveryErrors.find(isChannelPartialDeliveryError);
-            if (acceptedRecoveryError) {
-              throw acceptedRecoveryError;
+            const partialRecoveryErrors = recoveryErrors.filter(isChannelPartialDeliveryError);
+            const recoveryResults: Array<
+              Parameters<typeof createMessageReceiptFromOutboundResults>[0]["results"][number]
+            > = [...acceptedResults];
+            for (const recoveryError of partialRecoveryErrors) {
+              const deliveryResult = recoveryError.deliveryResult;
+              if (deliveryResult.receipt) {
+                recoveryResults.push({ receipt: deliveryResult.receipt });
+              } else {
+                recoveryResults.push(
+                  ...(deliveryResult.messageIds ?? []).map((messageId) => ({ messageId })),
+                );
+              }
+            }
+            const receipt = createMessageReceiptFromOutboundResults({ results: recoveryResults });
+            const messageIds = listMessageReceiptPlatformIds(receipt);
+            if (acceptedResults.length > 0 || messageIds.length > 0) {
+              const partialRecoveryError = partialRecoveryErrors[0];
+              throw createChannelPartialDeliveryError(
+                partialRecoveryError?.cause ?? recoveryErrors[0] ?? error,
+                {
+                  ...partialRecoveryError?.deliveryResult,
+                  messageIds,
+                  receipt,
+                  visibleReplySent: true,
+                },
+              );
+            }
+            if (partialRecoveryErrors[0] instanceof Error) {
+              throw partialRecoveryErrors[0];
             }
           }
           throw error;
@@ -240,19 +267,28 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
       durationMs: lineData.durationMs,
       trackingId: lineData.trackingId,
     };
+    const mediaPreparationErrors: unknown[] = [];
     const shouldSendQuickRepliesInline = !hasText && hasQuickReplies;
     const templateMessage = lineData.templateMessage
       ? buildTemplate(lineData.templateMessage)
       : undefined;
     const mediaMessageCount = mediaUrls.filter((url) => Boolean(url?.trim())).length;
     const messageKinds = new Set<string>();
-    if (lineData.flexMessage) messageKinds.add("flex");
-    if (templateMessage) messageKinds.add("template");
-    if (locationMessage) messageKinds.add(locationMessage.type);
+    if (lineData.flexMessage) {
+      messageKinds.add("flex");
+    }
+    if (templateMessage) {
+      messageKinds.add("template");
+    }
+    if (locationMessage) {
+      messageKinds.add(locationMessage.type);
+    }
     for (const message of orderedMessages) {
       messageKinds.add(message.type);
     }
-    if (mediaMessageCount > 0) messageKinds.add("media");
+    if (mediaMessageCount > 0) {
+      messageKinds.add("media");
+    }
     shouldBatchMixedPayload = !shouldSendQuickRepliesInline && messageKinds.size > 1;
     const sendMediaMessages = async () => {
       for (const url of mediaUrls) {
@@ -261,7 +297,11 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
           continue;
         }
         if (shouldBatchMixedPayload) {
-          pendingMessages.push(await buildLineMediaMessage(trimmed, mediaOptions, to));
+          try {
+            pendingMessages.push(await buildLineMediaMessage(trimmed, mediaOptions, to));
+          } catch (error) {
+            mediaPreparationErrors.push(error);
+          }
         } else {
           await recordResult(
             sendText(to, "", {
@@ -410,6 +450,26 @@ export const lineOutboundAdapter: NonNullable<ChannelPlugin<ResolvedLineAccount>
 
     if (shouldBatchMixedPayload) {
       await sendMessageBatch(pendingMessages);
+    }
+
+    if (mediaPreparationErrors.length > 0) {
+      const preparationError =
+        mediaPreparationErrors.length === 1
+          ? mediaPreparationErrors[0]
+          : new AggregateError(
+              mediaPreparationErrors,
+              "Some LINE media parts could not be prepared",
+            );
+      const receipt = createMessageReceiptFromOutboundResults({ results: acceptedResults });
+      const messageIds = listMessageReceiptPlatformIds(receipt);
+      if (messageIds.length > 0) {
+        throw createChannelPartialDeliveryError(preparationError, {
+          messageIds,
+          receipt,
+          visibleReplySent: true,
+        });
+      }
+      throw preparationError;
     }
 
     const completedResult = acceptedResults.at(-1);

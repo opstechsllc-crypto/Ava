@@ -3,7 +3,7 @@ import { HTTPFetchError } from "@line/bot-sdk";
 import { createChannelPartialDeliveryError } from "openclaw/plugin-sdk/channel-inbound";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../api.js";
-import { createRuntime } from "./channel.sendPayload.test-support.js";
+import { createRuntime, lineResult } from "./channel.sendPayload.test-support.js";
 import { lineOutboundAdapter } from "./outbound.js";
 import { setLineRuntime } from "./runtime.js";
 
@@ -90,6 +90,47 @@ describe("line outbound sendPayload batches", () => {
     );
   });
 
+  it("delivers valid mixed reply parts when media preparation fails", async () => {
+    const { runtime, mocks } = createRuntime();
+    setLineRuntime(runtime);
+    const cfg = { channels: { line: {} } } as OpenClawConfig;
+
+    const caught = await lineOutboundAdapter.sendPayload!({
+      to: "line:user:media-preparation-failure",
+      text: "Caption",
+      payload: {
+        text: "Caption",
+        mediaUrl: "https://example.com/clip.mp4",
+        channelData: {
+          line: {
+            mediaKind: "video",
+            flexMessage: { altText: "Card", contents: { type: "bubble" } },
+          },
+        },
+      },
+      accountId: "default",
+      cfg,
+    }).catch((error: unknown) => error);
+
+    expect(caught).toMatchObject({
+      code: "CHANNEL_PARTIAL_DELIVERY",
+      cause: new Error("LINE video messages require previewImageUrl to reference an image URL"),
+      deliveryResult: {
+        messageIds: ["m-batch"],
+        receipt: { platformMessageIds: ["m-batch"] },
+        visibleReplySent: true,
+      },
+    });
+    expect(mocks.pushMessagesLine).toHaveBeenCalledExactlyOnceWith(
+      "line:user:media-preparation-failure",
+      [
+        { type: "flex", altText: "Card", contents: { type: "bubble" } },
+        { type: "text", text: "Caption" },
+      ],
+      { verbose: false, accountId: "default", cfg },
+    );
+  });
+
   it("does not replay an accepted batch when the delivery observer throws HTTP 400", async () => {
     const { runtime, mocks } = createRuntime();
     setLineRuntime(runtime);
@@ -100,6 +141,7 @@ describe("line outbound sendPayload batches", () => {
     await expect(
       lineOutboundAdapter.sendPayload!({
         to: "line:user:observer-rejects",
+        text: "```js\nfirst()\n```\n\nCaption",
         payload: { text: "```js\nfirst()\n```\n\nCaption" },
         accountId: "default",
         cfg,
@@ -131,6 +173,7 @@ describe("line outbound sendPayload batches", () => {
     await expect(
       lineOutboundAdapter.sendPayload!({
         to: "line:user:partial-recovery",
+        text: "```js\nfirst()\n```\n\nCaption",
         payload: { text: "```js\nfirst()\n```\n\nCaption" },
         accountId: "default",
         cfg,
@@ -138,5 +181,99 @@ describe("line outbound sendPayload batches", () => {
     ).rejects.toBe(acceptedWithoutReceipt);
 
     expect(mocks.pushMessagesLine).toHaveBeenCalledTimes(3);
+  });
+
+  it("aggregates accepted receipts across success, rejection, and later recovery success", async () => {
+    const { runtime, mocks } = createRuntime();
+    setLineRuntime(runtime);
+    const cfg = { channels: { line: {} } } as OpenClawConfig;
+    mocks.pushMessagesLine
+      .mockRejectedValueOnce(refusal400())
+      .mockResolvedValueOnce(lineResult("accepted-A"))
+      .mockRejectedValueOnce(refusal400())
+      .mockResolvedValueOnce(lineResult("accepted-C"));
+
+    const caught = await lineOutboundAdapter.sendPayload!({
+      to: "line:user:recovery-receipts",
+      text: "Caption",
+      payload: {
+        text: "Caption",
+        mediaUrl: "https://example.com/image.jpg",
+        channelData: {
+          line: { flexMessage: { altText: "Card", contents: { type: "bubble" } } },
+        },
+      },
+      accountId: "default",
+      cfg,
+    }).catch((error: unknown) => error);
+
+    expect(caught).toMatchObject({
+      code: "CHANNEL_PARTIAL_DELIVERY",
+      deliveryResult: {
+        messageIds: ["accepted-A", "accepted-C"],
+        receipt: { platformMessageIds: ["accepted-A", "accepted-C"] },
+        visibleReplySent: true,
+      },
+    });
+    expect(mocks.pushMessagesLine).toHaveBeenCalledTimes(4);
+    expect(mocks.pushMessagesLine.mock.calls.map(([, messages]) => messages)).toEqual([
+      expect.arrayContaining([
+        expect.objectContaining({ type: "flex" }),
+        expect.objectContaining({ type: "text", text: "Caption" }),
+        expect.objectContaining({ type: "image" }),
+      ]),
+      [{ type: "flex", altText: "Card", contents: { type: "bubble" } }],
+      [{ type: "text", text: "Caption" }],
+      [
+        {
+          type: "image",
+          originalContentUrl: "https://example.com/image.jpg",
+          previewImageUrl: "https://example.com/image.jpg",
+        },
+      ],
+    ]);
+  });
+
+  it("merges receipt IDs from multiple partial recovery outcomes", async () => {
+    const { runtime, mocks } = createRuntime();
+    setLineRuntime(runtime);
+    const cfg = { channels: { line: {} } } as OpenClawConfig;
+    const partialB = createChannelPartialDeliveryError(new Error("receipt B unavailable"), {
+      messageIds: ["accepted-B"],
+      visibleReplySent: true,
+    });
+    const partialC = createChannelPartialDeliveryError(new Error("receipt C unavailable"), {
+      messageIds: ["accepted-C"],
+      visibleReplySent: true,
+    });
+    mocks.pushMessagesLine
+      .mockRejectedValueOnce(refusal400())
+      .mockResolvedValueOnce(lineResult("accepted-A"))
+      .mockRejectedValueOnce(partialB)
+      .mockRejectedValueOnce(partialC);
+
+    const caught = await lineOutboundAdapter.sendPayload!({
+      to: "line:user:partial-recovery-receipts",
+      text: "Caption",
+      payload: {
+        text: "Caption",
+        mediaUrl: "https://example.com/image.jpg",
+        channelData: {
+          line: { flexMessage: { altText: "Card", contents: { type: "bubble" } } },
+        },
+      },
+      accountId: "default",
+      cfg,
+    }).catch((error: unknown) => error);
+
+    expect(caught).toMatchObject({
+      code: "CHANNEL_PARTIAL_DELIVERY",
+      deliveryResult: {
+        messageIds: ["accepted-A", "accepted-B", "accepted-C"],
+        receipt: { platformMessageIds: ["accepted-A", "accepted-B", "accepted-C"] },
+        visibleReplySent: true,
+      },
+    });
+    expect(mocks.pushMessagesLine).toHaveBeenCalledTimes(4);
   });
 });

@@ -1,5 +1,4 @@
 import { HTTPFetchError } from "@line/bot-sdk";
-import { expectDefined } from "@openclaw/normalization-core";
 import {
   createChannelPartialDeliveryError,
   isChannelPartialDeliveryError,
@@ -69,10 +68,6 @@ function expectBatch(messages: readonly unknown[], target = to) {
   expect(mocks.pushMessagesLine).toHaveBeenCalledWith(target, messages, sendOptions);
 }
 
-function order(mock: { mock: { invocationCallOrder: number[] } }) {
-  return expectDefined(mock.mock.invocationCallOrder[0], "delivery invocation");
-}
-
 function delivery(messageIds: readonly string[], threadId = "c1") {
   return expect.objectContaining({
     channel: "line",
@@ -134,7 +129,9 @@ it("keeps oversized tables bounded while batching mixed parts", async () => {
     (message) => message.type === "text" && message.text.includes("Large"),
   );
   expect(oversizedChunks).toHaveLength(1);
-  expect(oversizedChunks.every((message) => message.text.length <= 5000)).toBe(true);
+  expect(
+    oversizedChunks.every((message) => message.type === "text" && message.text.length <= 5000),
+  ).toBe(true);
   expect(messages.at(-1)).toMatchObject({
     type: "flex",
     altText: "Code",
