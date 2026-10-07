@@ -62,6 +62,7 @@ import {
   isDebugProxyCaptureEnvEnabled,
   isGatewayRunFastPathArgv,
   isRemoteAgentDispatchInvocation,
+  resolveBareRootLaunchError,
   resolveMissingPluginCommandMessage,
   rewriteUpdateFlagArgv,
   shouldHandleBareRoot,
@@ -164,6 +165,13 @@ async function tryRunGatewayRunFastPath(
 async function resolveBareRootLaunchTarget(): Promise<BareRootLaunchTarget> {
   const { readConfigFileSnapshot } = await import("../config/config.js");
   const snapshot = await readConfigFileSnapshot();
+  if (!snapshot.valid) {
+    const { formatConfigReadFailureForCli } = await import("./config-validation-output.js");
+    const diagnostic = formatConfigReadFailureForCli(snapshot);
+    if (diagnostic) {
+      return { kind: "config-read-failure", diagnostic };
+    }
+  }
   if (await shouldStartLocalOnboarding(snapshot)) {
     return { kind: "onboarding" };
   }
@@ -1197,41 +1205,27 @@ async function runCliWithPreparedOutputMode(
       : null;
 
     if (bareRootLaunchTarget) {
+      const launchError = resolveBareRootLaunchError(
+        bareRootLaunchTarget,
+        process.stdin.isTTY && process.stdout.isTTY,
+      );
+      if (launchError) {
+        console.error(launchError);
+        process.exitCode = 1;
+        return;
+      }
       if (bareRootLaunchTarget.kind === "remote-gateway-inference") {
-        if (!process.stdin.isTTY || !process.stdout.isTTY) {
-          console.error(
-            "Remote Gateway inference setup needs an interactive TTY. Re-run `openclaw` in a terminal connected to this Gateway.",
-          );
-          process.exitCode = 1;
-          return;
-        }
         const { runRemoteGatewayInferenceOnboarding } =
           await import("../commands/onboard-remote-gateway.js");
         await runRemoteGatewayInferenceOnboarding(bareRootLaunchTarget.target);
         return;
       }
       if (bareRootLaunchTarget.kind === "onboarding") {
-        if (!process.stdin.isTTY || !process.stdout.isTTY) {
-          console.error(
-            bareRootLaunchTarget.classic
-              ? "OpenClaw config is invalid. Run `openclaw doctor --fix` before onboarding."
-              : "Onboarding needs an interactive TTY. Use `openclaw onboard --non-interactive --accept-risk ...` for automation.",
-          );
-          process.exitCode = 1;
-          return;
-        }
         const { setupWizardCommand } = await import("../commands/onboard.js");
         await setupWizardCommand(bareRootLaunchTarget.classic ? { classic: true } : {});
         return;
       }
       if (bareRootLaunchTarget.kind === "tui") {
-        if (!process.stdin.isTTY || !process.stdout.isTTY) {
-          console.error(
-            "OpenClaw TUI needs an interactive TTY. Use `openclaw agent --local ...` for automation.",
-          );
-          process.exitCode = 1;
-          return;
-        }
         const { runTui } = await import("../tui/tui.js");
         // This TUI now shares the CLI process, so keep its final exit fallback armed
         // in case imported runtime handles survive the normal teardown.
