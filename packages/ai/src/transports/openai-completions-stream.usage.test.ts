@@ -116,6 +116,31 @@ async function runChunks(chunks: readonly unknown[], model = makeCompletionsMode
   return { output, events };
 }
 
+async function captureModelProgress(
+  chunks: readonly unknown[],
+  model = makeCompletionsModel(),
+  options: { emitReasoning?: boolean } = {},
+) {
+  const output = createAssistantOutput(model);
+  const controller = new AbortController();
+  const progress: boolean[] = [];
+  const unsubscribe = onLlmRequestActivity(controller.signal, (modelProgress) => {
+    progress.push(modelProgress);
+  });
+  try {
+    await processCompletionsStream(
+      streamChunks(chunks),
+      output,
+      model,
+      { push() {} },
+      { ...options, signal: controller.signal },
+    );
+  } finally {
+    unsubscribe();
+  }
+  return { output, progress };
+}
+
 describe("openai completions stream", () => {
   it.each(usageCases)("parses $name", ({ usage, expected, model = pricedModel }) => {
     expectRecordFields(parseOpenAICompletionsUsage(usage, model), expected);
@@ -239,6 +264,43 @@ describe("openai completions stream", () => {
     ]);
   });
 
+  it.each([
+    {
+      name: "nested empty text",
+      delta: { content: [{ type: "text", text: "" }] },
+    },
+    {
+      name: "empty legacy function call",
+      delta: { function_call: {} },
+    },
+  ])("does not count $name as model progress", async ({ delta }) => {
+    const { output, progress } = await captureModelProgress([
+      makeCompletionsChunk(delta),
+      makeCompletionsChunk({ role: "assistant" }, "stop"),
+    ]);
+
+    expect(progress).toEqual([false, false]);
+    expect(output.content).toEqual([]);
+  });
+
+  it("counts valid tool-call fragments as model progress", async () => {
+    const { progress } = await captureModelProgress([
+      makeCompletionsChunk({
+        tool_calls: [
+          {
+            index: 0,
+            id: "call-progress",
+            type: "function",
+            function: { name: "lookup", arguments: "{}" },
+          },
+        ],
+      }),
+      makeCompletionsChunk({}, "tool_calls"),
+    ]);
+
+    expect(progress).toEqual([true, false]);
+  });
+
   it("counts only advancing usage-only reasoning as progress when reasoning is hidden", async () => {
     const model = makeCompletionsModel({
       id: "google/gemini-2.5-flash",
@@ -247,53 +309,40 @@ describe("openai completions stream", () => {
       baseUrl: "http://127.0.0.1:8787/v1beta1/projects/test/locations/us/endpoints/openapi",
       contextWindow: 1_000_000,
     });
-    const output = createAssistantOutput(model);
-    const controller = new AbortController();
-    const progress: boolean[] = [];
-    const unsubscribe = onLlmRequestActivity(controller.signal, (modelProgress) => {
-      progress.push(modelProgress);
-    });
-
-    try {
-      await processCompletionsStream(
-        streamChunks([
-          makeCompletionsChunk({}, null, {
-            choices: [],
-            usage: {
-              prompt_tokens: 8,
-              completion_tokens: 7,
-              total_tokens: 15,
-              completion_tokens_details: { reasoning_tokens: 7 },
-            },
-          }),
-          makeCompletionsChunk({}, null, {
-            choices: [],
-            usage: {
-              prompt_tokens: 8,
-              completion_tokens: 7,
-              total_tokens: 15,
-              completion_tokens_details: { reasoning_tokens: 7 },
-            },
-          }),
-          makeCompletionsChunk({}, null, {
-            choices: [],
-            usage: {
-              prompt_tokens: 8,
-              completion_tokens: 9,
-              total_tokens: 17,
-              completion_tokens_details: { reasoning_tokens: 9 },
-            },
-          }),
-          makeCompletionsChunk({}, null, { choices: [] }),
-        ]),
-        output,
-        model,
-        { push() {} },
-        { emitReasoning: false, signal: controller.signal },
-      );
-    } finally {
-      unsubscribe();
-    }
+    const { output, progress } = await captureModelProgress(
+      [
+        makeCompletionsChunk({}, null, {
+          choices: [],
+          usage: {
+            prompt_tokens: 8,
+            completion_tokens: 7,
+            total_tokens: 15,
+            completion_tokens_details: { reasoning_tokens: 7 },
+          },
+        }),
+        makeCompletionsChunk({}, null, {
+          choices: [],
+          usage: {
+            prompt_tokens: 8,
+            completion_tokens: 7,
+            total_tokens: 15,
+            completion_tokens_details: { reasoning_tokens: 7 },
+          },
+        }),
+        makeCompletionsChunk({}, null, {
+          choices: [],
+          usage: {
+            prompt_tokens: 8,
+            completion_tokens: 9,
+            total_tokens: 17,
+            completion_tokens_details: { reasoning_tokens: 9 },
+          },
+        }),
+        makeCompletionsChunk({}, null, { choices: [] }),
+      ],
+      model,
+      { emitReasoning: false },
+    );
 
     expect(progress).toEqual([true, false, true, false]);
     expect(output.content).toEqual([]);
