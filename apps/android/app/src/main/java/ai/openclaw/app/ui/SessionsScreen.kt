@@ -127,7 +127,7 @@ internal fun SessionsScreen(
   var deleteGroupTarget by key("delete-group-owner") {
     rememberSaveable(stateSaver = SessionGroupActionTargetSaver) { mutableStateOf<SessionGroupActionTarget?>(null) }
   }
-  var newGroupDialogVisible by rememberSaveable { mutableStateOf(false) }
+  var newGroupGatewayId by rememberSaveable { mutableStateOf<String?>(null) }
   val searchState =
     rememberSessionBrowserSearchState(
       viewModel = viewModel,
@@ -165,6 +165,7 @@ internal fun SessionsScreen(
     deleteSessionTarget = deleteSessionTarget?.takeIf { it.matchesGateway(activeGatewayStableId) }
     renameGroupTarget = renameGroupTarget?.takeIf { it.gatewayStableId == activeGatewayStableId }
     deleteGroupTarget = deleteGroupTarget?.takeIf { it.gatewayStableId == activeGatewayStableId }
+    newGroupGatewayId = newGroupGatewayId?.takeIf { it == activeGatewayStableId }
   }
 
   LaunchedEffect(isConnected, filter) {
@@ -357,7 +358,7 @@ internal fun SessionsScreen(
                 SessionGroupHeader(
                   title = title,
                   onRename = { renameGroupTarget = SessionGroupActionTarget(activeGatewayStableId, title) },
-                  onNewGroup = { newGroupDialogVisible = true },
+                  onNewGroup = { newGroupGatewayId = activeGatewayStableId },
                   onDelete = { deleteGroupTarget = SessionGroupActionTarget(activeGatewayStableId, title) },
                 )
               } else {
@@ -525,10 +526,13 @@ internal fun SessionsScreen(
       onConfirm = { value ->
         groupSessionTarget = null
         if (!session.matchesGateway(activeGatewayStableId)) return@SessionTextDialog
-        // Remember the name so the group survives locally even if the patch later empties it.
-        viewModel.addChatSessionGroup(value)
         coroutineScope.launch {
-          viewModel.patchChatSession(key = session.key, ownerAgentId = session.ownerAgentId, category = value.trim())
+          viewModel.addChatSessionGroup(
+            value,
+            expectedGatewayStableId = session.gatewayStableId,
+            sessionKey = session.key,
+            ownerAgentId = session.ownerAgentId,
+          )
         }
       },
     )
@@ -555,17 +559,18 @@ internal fun SessionsScreen(
     )
   }
 
-  if (newGroupDialogVisible) {
+  newGroupGatewayId?.let { ownerGatewayId ->
     SessionTextDialog(
       title = nativeString("New group"),
-      stateKey = "group-new",
+      stateKey = "group-new:$ownerGatewayId",
       initialValue = "",
       confirmLabel = nativeString("Create"),
       allowEmpty = false,
-      onDismiss = { newGroupDialogVisible = false },
+      onDismiss = { newGroupGatewayId = null },
       onConfirm = { value ->
-        newGroupDialogVisible = false
-        viewModel.addChatSessionGroup(value)
+        newGroupGatewayId = null
+        if (ownerGatewayId != viewModel.activeGatewayStableId.value) return@SessionTextDialog
+        coroutineScope.launch { viewModel.addChatSessionGroup(value, expectedGatewayStableId = ownerGatewayId) }
       },
     )
   }
@@ -602,7 +607,7 @@ internal fun SessionsScreen(
 }
 
 @Composable
-private fun SessionDeleteDialog(
+internal fun SessionDeleteDialog(
   title: String,
   text: String,
   onDismiss: () -> Unit,
@@ -982,7 +987,7 @@ private fun SessionMenuItem(
 }
 
 @Composable
-private fun SessionTextDialog(
+internal fun SessionTextDialog(
   title: String,
   stateKey: String,
   initialValue: String,
@@ -1440,12 +1445,12 @@ internal data class SessionActionTarget(
   fun matchesGateway(activeGatewayStableId: String?): Boolean = gatewayStableId == activeGatewayStableId
 }
 
-private data class SessionGroupActionTarget(
+internal data class SessionGroupActionTarget(
   val gatewayStableId: String?,
   val name: String,
 )
 
-private val SessionGroupActionTargetSaver =
+internal val SessionGroupActionTargetSaver =
   Saver<SessionGroupActionTarget?, ArrayList<String>>(
     save = { target -> target?.let { arrayListOf(it.gatewayStableId.orEmpty(), it.name) } ?: arrayListOf() },
     restore = { values ->
@@ -1455,7 +1460,7 @@ private val SessionGroupActionTargetSaver =
 
 private const val SESSION_ACTION_TARGET_STATE_FIELDS = 9
 
-private val SessionActionTargetSaver =
+internal val SessionActionTargetSaver =
   Saver<SessionActionTarget?, ArrayList<String>>(
     save = { target -> target?.toSavedState() ?: arrayListOf() },
     restore = ::sessionActionTargetFromSavedState,

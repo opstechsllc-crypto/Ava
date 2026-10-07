@@ -6,8 +6,10 @@ import ai.openclaw.app.NodeApp
 import ai.openclaw.app.NodeRuntime
 import ai.openclaw.app.NodeRuntimeMode
 import ai.openclaw.app.SecurePrefs
+import ai.openclaw.app.chat.ChatCacheScope
 import ai.openclaw.app.chat.ChatController
 import ai.openclaw.app.closeNodeRuntimeTestFixture
+import ai.openclaw.app.gateway.GatewaySession
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
@@ -339,24 +341,37 @@ class RootScreenFoldTest {
         destination = HomeDestination.Chat,
         configureRuntime = { runtime ->
           val controller = ReflectionHelpers.getField<ChatController>(runtime, "chat")
-          val requestField = ChatController::class.java.getDeclaredField("requestGateway").apply { isAccessible = true }
+          val leaseField = ChatController::class.java.getDeclaredField("captureRequestLease").apply { isAccessible = true }
 
           @Suppress("UNCHECKED_CAST")
-          val original = requestField.get(controller) as suspend (String, String?) -> String
-          val request: suspend (String, String?) -> String = { method, params ->
-            if (method == "sessions.patch") {
-              val patch = Json.parseToJsonElement(requireNotNull(params)).jsonObject
-              if ("pinned" in patch) pinRequests.add(patch)
+          val original = leaseField.get(controller) as (ChatCacheScope?) -> GatewaySession.RequestLease?
+          val capture: (ChatCacheScope?) -> GatewaySession.RequestLease? = { gatewayScope ->
+            original(gatewayScope)?.let { lease ->
+              GatewaySession.RequestLease(
+                endpointStableId = lease.endpointStableId,
+                isCurrentImpl = lease::isCurrent,
+                commitIfCurrentImpl = lease::commitIfCurrent,
+                controlUiCredential = lease.controlUiCredential,
+              ) { method, params, timeoutMs, withEnqueue ->
+                lease.request(method, params, timeoutMs) { enqueue ->
+                  withEnqueue {
+                    if (method == "sessions.patch") {
+                      val patch = Json.parseToJsonElement(requireNotNull(params)).jsonObject
+                      if ("pinned" in patch) pinRequests.add(patch)
+                    }
+                    enqueue()
+                  }
+                }
+              }
             }
-            original(method, params)
           }
-          restoreRequest = { requestField.set(controller, original) }
-          requestField.set(controller, request)
+          restoreRequest = { leaseField.set(controller, original) }
+          leaseField.set(controller, capture)
         },
       ) { model ->
         val sessionKey = model.chatSessionKey.value
         composeRule.onNodeWithContentDescription("Show Sidebar").performClick()
-        composeRule.onNodeWithText("Recent").performScrollTo().performClick()
+        composeRule.onNodeWithText("Other").performScrollTo().performClick()
         val row = composeRule.onNodeWithText("Android QA").performScrollTo()
         val session = model.chatSessions.value.single { it.key == "discord:android" }
         val expectedPatch =
@@ -505,7 +520,7 @@ class RootScreenFoldTest {
     withRoot(completed = true, destination = HomeDestination.Chat) {
       emit(listOf(testFold(Rect(0, 400, view.width, 420))))
       composeRule.onNodeWithContentDescription("Show Sidebar").performClick()
-      composeRule.onNodeWithText("Recent").performScrollTo().performClick()
+      composeRule.onNodeWithText("Other").performScrollTo().performClick()
       composeRule.onNodeWithText("Android QA").performScrollTo().assertIsDisplayed()
       val scroll = composeRule.onNode(hasScrollAction() and hasAnyAncestor(hasTestTag("sidebar-drawer")))
       val position = scroll.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value()
@@ -678,7 +693,7 @@ class RootScreenFoldTest {
     withRoot(completed = true) {
       val hinge = Rect(400, 0, 420, view.height)
       emit(listOf(testFold(hinge)))
-      composeRule.onNodeWithText("Recent").performScrollTo().performClick()
+      composeRule.onNodeWithText("Other").performScrollTo().performClick()
       composeRule.onNodeWithText("Android QA").performScrollTo().assertIsDisplayed()
       val sidebarScroll = hasScrollAction() and hasAnyAncestor(hasTestTag("sidebar-permanent") or hasTestTag("sidebar-drawer"))
       val scroll =

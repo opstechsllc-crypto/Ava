@@ -49,6 +49,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -597,6 +598,8 @@ class ChatController internal constructor(
   private val _swarmGroups = MutableStateFlow<List<ChatSwarmGroup>>(emptyList())
   val swarmGroups: StateFlow<List<ChatSwarmGroup>> = _swarmGroups.asStateFlow()
 
+  internal val sessionGroupCatalogInvalidations = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
   private data class SwarmRefreshLease(
     val parentKey: String,
     val cacheScope: ChatCacheScope,
@@ -820,6 +823,23 @@ class ChatController internal constructor(
 
   // Retained selection and event rows must not enlarge the next requested page.
   private var sessionsListLimit: Int? = null
+  private var sessionRosterNextOffset: Int? = null
+  private var sessionRosterLoadedLimit: Int? = null
+  private val _sessionRosterHasMore = MutableStateFlow(false)
+  val sessionRosterHasMore: StateFlow<Boolean> = _sessionRosterHasMore.asStateFlow()
+  private val _sessionRosterSettled = MutableStateFlow(false)
+  val sessionRosterSettled: StateFlow<Boolean> = _sessionRosterSettled.asStateFlow()
+  private val _sessionRosterLoadingMore = MutableStateFlow(false)
+  val sessionRosterLoadingMore: StateFlow<Boolean> = _sessionRosterLoadingMore.asStateFlow()
+  private val sessionRosterLoadMutex = Mutex()
+
+  private fun clearSessionRosterPaging() {
+    sessionRosterNextOffset = null
+    sessionRosterLoadedLimit = null
+    _sessionRosterHasMore.value = false
+    _sessionRosterLoadingMore.value = false
+    _sessionRosterSettled.value = false
+  }
 
   // One acknowledgement per unread episode: the pending flag clears when the
   // server-confirmed read (unread=false) arrives, so fresh activity on the open
@@ -1049,6 +1069,7 @@ class ChatController internal constructor(
       applyThinkingMetadata(null)
       sessionsListArchived = false
       sessionsListLimit = null
+      clearSessionRosterPaging()
       unreadPatchSessionKey = null
       unreadActivationObserved = false
       unreadActivationMarkedUnreadAt = null
@@ -1212,6 +1233,7 @@ class ChatController internal constructor(
     publishSessions(emptyList())
     sessionsListArchived = false
     sessionsListLimit = null
+    clearSessionRosterPaging()
     val generation = beginHistoryLoad(key, ownerAgentId = null)
     bootstrap(sessionKey = key, generation = generation)
   }
@@ -1250,10 +1272,24 @@ class ChatController internal constructor(
     limit: Int? = null,
     archived: Boolean = false,
   ) {
-    scope.launch { fetchSessions(limit = limit, archived = archived) }
+    scope.launch { fetchSessionsForCurrentWindow(limit = limit, archived = archived) }
   }
 
-  suspend fun patchSession(
+  /** Next sidebar roster page. Rows merge into the folders they already belong to. */
+  suspend fun loadMoreSessions(): Boolean =
+    sessionRosterLoadMutex.withLock {
+      val limit = sessionsListLimit?.takeIf { it > 0 } ?: SIDEBAR_SESSION_ROSTER_LIMIT
+      val offset = sessionRosterNextOffset
+      if (sessionsListArchived || offset == null || !_sessionRosterHasMore.value) return false
+      _sessionRosterLoadingMore.value = true
+      try {
+        fetchSessions(limit = limit, archived = false, offset = offset, append = true)
+      } finally {
+        _sessionRosterLoadingMore.value = false
+      }
+    }
+
+  internal suspend fun patchSession(
     key: String,
     ownerAgentId: String? = null,
     expectedSessionId: String? = null,
@@ -1269,9 +1305,12 @@ class ChatController internal constructor(
     archived: Boolean? = null,
     unread: Boolean? = null,
     unreadExpectation: ChatSessionUnreadExpectation? = null,
+    requestLease: GatewaySession.RequestLease? = null,
   ): Boolean {
     val sessionKey = key.trim().takeIf { it.isNotEmpty() } ?: return false
     val requestCacheScope = currentCacheScope()
+    val lease = requestLease ?: captureRequestLease(requestCacheScope) ?: return false
+    if (!lease.isCurrent()) return false
     val capturedOwnerAgentId =
       resolveAgentIdFromMainSessionKey(sessionKey)
         ?: ownerAgentId?.trim()?.takeIf { it.isNotEmpty() }
@@ -1337,7 +1376,6 @@ class ChatController internal constructor(
                 ?.takeIf { it.key == sessionKey && (it.observedSessionId == null || it.observedSessionId == lifecycleSessionId) }
             active to remembered
           }
-        val lease = captureRequestLease(requestCacheScope) ?: throw GatewayRequestNotEnqueued("not connected")
         lease.request("sessions.patch", params.toString(), 10 * 60_000L)
         lease.commitIfCurrent {
           synchronized(gatewayScopeApplyLock) {
@@ -1363,17 +1401,20 @@ class ChatController internal constructor(
           }
         }
       } else {
-        requestGateway("sessions.patch", params.toString())
+        lease.request("sessions.patch", params.toString())
       }
-      fetchSessionsForCurrentWindow()
+      if (lease.isCurrent() && requestCacheScope == currentCacheScope()) fetchSessionsForCurrentWindow()
       return true
     } catch (err: Throwable) {
-      updateErrorText(err.message)
+      if (lease.isCurrent() && requestCacheScope == currentCacheScope()) updateErrorText(err.message)
       return false
     }
   }
 
-  /** Renames a session group everywhere: every member session moves to the new category. */
+  /**
+   * Legacy client sweep. Catalog UI uses [renameSessionGroupCatalog]; the gateway method
+   * repoints members, so new callers must not list sessions to rename or delete a group.
+   */
   suspend fun renameSessionGroup(
     from: String,
     to: String,
@@ -1391,6 +1432,98 @@ class ChatController internal constructor(
   ) {
     val groupName = group.trim().takeIf { it.isNotEmpty() } ?: return
     patchSessionGroupMembers(group = groupName, category = null, expectedGatewayId = expectedGatewayId)
+  }
+
+  /** Binds catalog I/O to the gateway that was current when the caller started. */
+  internal fun captureSessionCatalogLease(expectedGatewayId: String): GatewaySession.RequestLease? {
+    val gatewayId = expectedGatewayId.trim().takeIf { it.isNotEmpty() } ?: return null
+    return captureRequestLease(ChatCacheScope(gatewayId = gatewayId, connectionGeneration = 0L))
+  }
+
+  /** Gateway catalog. Failures stay quiet so a missing method does not toast on every sidebar open. */
+  internal suspend fun listSessionGroups(lease: GatewaySession.RequestLease): SessionGroupCatalogSnapshot? =
+    requestSessionGroups(
+      lease,
+      "sessions.groups.list",
+      buildJsonObject {},
+      reportError = false,
+    )
+
+  internal suspend fun putSessionGroups(
+    names: List<String>,
+    lease: GatewaySession.RequestLease,
+    sectionOrder: List<String>? = null,
+  ): SessionGroupCatalogSnapshot? {
+    val cleaned = names.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+    return requestSessionGroups(
+      lease,
+      "sessions.groups.put",
+      buildJsonObject {
+        put("names", JsonArray(cleaned.map(::JsonPrimitive)))
+        if (sectionOrder != null) {
+          put("sectionOrder", JsonArray(sectionOrder.map(::JsonPrimitive)))
+        }
+      },
+      reportError = true,
+    )
+  }
+
+  /** Renames a catalog group. The gateway repoints members; this does not sweep sessions.list. */
+  internal suspend fun renameSessionGroupCatalog(
+    from: String,
+    to: String,
+    lease: GatewaySession.RequestLease,
+  ): SessionGroupCatalogSnapshot? {
+    val fromName = from.trim()
+    val toName = to.trim()
+    if (fromName.isEmpty() || toName.isEmpty() || fromName == toName) return null
+    val updated =
+      requestSessionGroups(
+        lease,
+        "sessions.groups.rename",
+        buildJsonObject {
+          put("name", JsonPrimitive(fromName))
+          put("to", JsonPrimitive(toName))
+        },
+        reportError = true,
+      ) ?: return null
+    if (lease.isCurrent()) fetchSessionsForCurrentWindow()
+    return updated
+  }
+
+  /** Deletes a catalog group. The gateway clears member categories; this does not sweep sessions.list. */
+  internal suspend fun deleteSessionGroupCatalog(
+    name: String,
+    lease: GatewaySession.RequestLease,
+  ): SessionGroupCatalogSnapshot? {
+    val groupName = name.trim()
+    if (groupName.isEmpty()) return null
+    val updated =
+      requestSessionGroups(
+        lease,
+        "sessions.groups.delete",
+        buildJsonObject { put("name", JsonPrimitive(groupName)) },
+        reportError = true,
+      ) ?: return null
+    if (lease.isCurrent()) fetchSessionsForCurrentWindow()
+    return updated
+  }
+
+  private suspend fun requestSessionGroups(
+    lease: GatewaySession.RequestLease,
+    method: String,
+    params: JsonObject,
+    reportError: Boolean,
+  ): SessionGroupCatalogSnapshot? {
+    return try {
+      if (!lease.isCurrent()) return null
+      parseSessionGroupCatalog(lease.request(method, params.toString()))
+    } catch (err: CancellationException) {
+      throw err
+    } catch (err: Throwable) {
+      if (reportError && lease.isCurrent()) updateErrorText(err.message)
+      null
+    }
   }
 
   private suspend fun patchSessionGroupMembers(
@@ -1548,7 +1681,7 @@ class ChatController internal constructor(
         }
       val lease = captureRequestLease(requestCacheScope) ?: throw GatewayRequestNotEnqueued("not connected")
       val createdKey = parseCreatedSessionKey(json, requestSessionCreate(requestCacheScope, params, lease))
-      fetchSessions(limit = sessionsListLimit, archived = false)
+      fetchSessionsForCurrentWindow(archived = false)
       createdKey
     } catch (err: Throwable) {
       updateErrorText(err.message)
@@ -4830,6 +4963,9 @@ class ChatController internal constructor(
   private suspend fun fetchSessions(
     limit: Int?,
     archived: Boolean = false,
+    offset: Int? = null,
+    append: Boolean = false,
+    preserveWindow: Boolean = false,
   ): Boolean {
     val requestCacheScope = currentCacheScope()
     val requestLimit = limit?.takeIf { it > 0 }
@@ -4858,9 +4994,9 @@ class ChatController internal constructor(
             refresh.settingsSnapshots.clear()
             settingsMutationRevision(requestCacheScope)
           }
-        val params = sessionListParams(requestAgentId, requestLimit, archived)
+        val params = sessionListParams(requestAgentId, requestLimit, archived, offset = if (append) offset else null)
         val res = requestGateway("sessions.list", params.toString())
-        val parsed = parseSessions(res)
+        val parsed = parseSessions(res, requestedOffset = if (append) offset ?: 0 else 0)
         val result =
           parsed.copy(
             sessions = parsed.sessions.map { session -> session.copy(ownerAgentId = requestAgentId) },
@@ -4885,11 +5021,27 @@ class ChatController internal constructor(
                   .firstOrNull {
                     it.key == activeSessionKey && it.ownerAgentId == requestAgentId
                   }?.takeIf { result.sessions.none { row -> row.key == activeSessionKey } }
-              val sessions = if (selected == null) result.sessions else result.sessions + selected
+              val page = if (append) mergeSessionRosterPages(_sessions.value, result.sessions) else result.sessions
+              val sessions =
+                if (selected == null || page.any { it.key == activeSessionKey }) {
+                  page
+                } else {
+                  page + selected
+                }
               publishSessions(sessions)
               result.sessions.forEach { observeSessionSettings(it) }
-              sessionsListArchived = archived
-              sessionsListLimit = requestLimit
+              if (!append) {
+                sessionsListArchived = archived
+                if (!preserveWindow) sessionsListLimit = requestLimit
+              }
+              if (archived) {
+                clearSessionRosterPaging()
+              } else {
+                sessionRosterLoadedLimit = requestLimit?.let { it + if (append) offset ?: 0 else 0 }
+                sessionRosterNextOffset = result.nextOffset
+                _sessionRosterHasMore.value = result.hasMore
+                _sessionRosterSettled.value = true
+              }
               val activeOutsideLocalWindow =
                 sessions
                   .drop(MAX_CACHED_SESSIONS)
@@ -5182,7 +5334,24 @@ class ChatController internal constructor(
     }
   }
 
-  private suspend fun fetchSessionsForCurrentWindow(): Boolean = fetchSessions(limit = sessionsListLimit, archived = sessionsListArchived)
+  private suspend fun fetchSessionsForCurrentWindow(
+    limit: Int? = null,
+    archived: Boolean? = null,
+  ): Boolean =
+    sessionRosterLoadMutex.withLock {
+      val requestArchived = archived ?: sessionsListArchived
+      val requestedPageSize = limit?.takeIf { it > 0 }
+      val requestedLimit = requestedPageSize ?: sessionsListLimit ?: SIDEBAR_SESSION_ROSTER_LIMIT.takeUnless { requestArchived }
+      val loadedLimit =
+        sessionRosterLoadedLimit.takeIf {
+          !requestArchived && !sessionsListArchived && (requestedPageSize == null || requestedPageSize == sessionsListLimit)
+        }
+      fetchSessions(
+        limit = loadedLimit?.let { maxOf(it, requestedLimit ?: it) } ?: requestedLimit,
+        archived = requestArchived,
+        preserveWindow = loadedLimit != null,
+      )
+    }
 
   private fun refreshSessionsForCurrentWindow() {
     scope.launch { fetchSessionsForCurrentWindow() }
@@ -5272,7 +5441,9 @@ class ChatController internal constructor(
           if (lease == null) publish() else lease.commitIfCurrent(publish)
           if (!applied || lease?.isCurrent() != true || !synchronized(gatewayScopeApplyLock) { ownsSelection() }) return@async
           if (healthy == true && !hasCurrentChatMetadata()) fetchChatMetadata()
-          if (refresh.refreshSessions && lease.isCurrent() && synchronized(gatewayScopeApplyLock) { ownsSelection() }) fetchSessions(limit = 50)
+          if (refresh.refreshSessions && lease.isCurrent() && synchronized(gatewayScopeApplyLock) { ownsSelection() }) {
+            fetchSessionsForCurrentWindow()
+          }
         } finally {
           synchronized(gatewayScopeApplyLock) { refresh.claimed = false }
         }
@@ -6340,6 +6511,7 @@ class ChatController internal constructor(
     val swarmKind = swarmKindElement.asStringOrNull()?.trim()
     if (swarmEvent && (swarmKind == "phase" || swarmKind == "log")) return
     val reason = payload["reason"].asStringOrNull()
+    if (reason == "groups") sessionGroupCatalogInvalidations.tryEmit(Unit)
     if (isSessionSettingsMutation(payload)) {
       val session = eventSessionObject(payload)
       val key = payload["sessionKey"].asStringOrNull() ?: session?.get("key").asStringOrNull()
@@ -7644,6 +7816,8 @@ class ChatController internal constructor(
   private data class SessionListResult(
     val sessions: List<ChatSessionEntry>,
     val isTruncated: Boolean,
+    val hasMore: Boolean = false,
+    val nextOffset: Int? = null,
   )
 
   private data class SessionSettingsPatchResolution(
@@ -7655,7 +7829,10 @@ class ChatController internal constructor(
     val entry: ChatSessionEntry?,
   )
 
-  private fun parseSessions(jsonString: String): SessionListResult {
+  private fun parseSessions(
+    jsonString: String,
+    requestedOffset: Int = 0,
+  ): SessionListResult {
     val root =
       json.parseToJsonElement(jsonString).asObjectOrNull()
         ?: return SessionListResult(emptyList(), isTruncated = false)
@@ -7665,10 +7842,17 @@ class ChatController internal constructor(
         ?.mapNotNull { item -> parseSessionEntry(item.asObjectOrNull()) }
         .orEmpty()
     val totalCount = root["totalCount"].asLongOrNull()
+    val page =
+      sessionRosterPageInfo(
+        hasMore = root["hasMore"].asBooleanOrNull(),
+        totalCount = totalCount,
+        nextOffset = root["nextOffset"].asLongOrNull()?.toInt(),
+        requestedOffset = requestedOffset,
+        pageSize = sessions.size,
+      )
     val isTruncated =
-      root["hasMore"].asBooleanOrNull() == true ||
-        (totalCount != null && totalCount > sessions.size)
-    return SessionListResult(sessions, isTruncated)
+      page.hasMore || (totalCount != null && totalCount > requestedOffset + sessions.size.toLong())
+    return SessionListResult(sessions, isTruncated, hasMore = page.hasMore, nextOffset = page.nextOffset)
   }
 
   private fun parseSessionEntry(
@@ -7705,6 +7889,7 @@ class ChatController internal constructor(
       label = obj["label"].asStringOrNull()?.trim(),
       autoLabel = obj["autoLabel"].asStringOrNull()?.trim(),
       category = obj["category"].asStringOrNull()?.trim(),
+      kind = obj.nonBlankString("kind"),
       color =
         obj["color"]
           .asJsonStringOrNull()
@@ -8301,12 +8486,14 @@ private fun sessionListParams(
   limit: Int?,
   archived: Boolean = false,
   search: String? = null,
+  offset: Int? = null,
 ): JsonObject =
   buildJsonObject {
     put("includeGlobal", JsonPrimitive(true))
     put("includeUnknown", JsonPrimitive(false))
     put("agentId", JsonPrimitive(ownerAgentId))
     if (limit != null) put("limit", JsonPrimitive(limit))
+    if (offset != null && offset > 0) put("offset", JsonPrimitive(offset))
     if (search != null) put("search", JsonPrimitive(search))
     if (archived) put("archived", JsonPrimitive(true))
   }
@@ -9002,6 +9189,7 @@ internal fun mergeChatSessionEntry(
     label = next.label ?: existing.label,
     autoLabel = next.autoLabel ?: existing.autoLabel,
     category = next.category ?: existing.category,
+    kind = next.kind ?: existing.kind,
     // Omitted metadata preserves the tint; explicit null from another client clears it.
     color = if (next.hasColorMetadata) next.color else existing.color,
     hasColorMetadata = existing.hasColorMetadata || next.hasColorMetadata,
