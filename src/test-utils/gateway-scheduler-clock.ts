@@ -24,7 +24,14 @@ export function createTestGatewayScheduler(
 export function createGatewaySchedulerClock(initialNowMs = 0) {
   let nowMs = initialNowMs;
   let elapsedMs = 0;
-  let armed: { run: () => void | Promise<void>; atMs: number; elapsedAtMs: number } | undefined;
+  let armed:
+    | {
+        run: () => void | Promise<void>;
+        originalRun: () => void | Promise<void>;
+        atMs: number;
+        elapsedAtMs: number;
+      }
+    | undefined;
   const wakes: Array<{
     run: () => void | Promise<void>;
     atMs: number;
@@ -48,6 +55,7 @@ export function createGatewaySchedulerClock(initialNowMs = 0) {
           }
           return run();
         },
+        originalRun: run,
         atMs: nowMs + delayMs,
         elapsedAtMs: elapsedMs + delayMs,
         delayMs,
@@ -68,6 +76,15 @@ export function createGatewaySchedulerClock(initialNowMs = 0) {
     armed = undefined;
     return timer?.run();
   };
+  /** Simulate a scheduler wake fired by a wall-clock deadline (remaining() takes
+   * min(wallDelay, monotonicDelay); a wall-clock forward jump makes wallDelay
+   * negative so the job is due without the monotonic deadline passing). Unlike
+   * wake()/advanceBy this does not advance monotonic time. */
+  const wakeDueToWallClock = () => {
+    const timer = armed;
+    armed = undefined;
+    return timer?.originalRun();
+  };
   const advanceTo = (timeMs: number) => {
     elapsedMs += Math.max(0, timeMs - nowMs);
     nowMs = timeMs;
@@ -83,7 +100,11 @@ export function createGatewaySchedulerClock(initialNowMs = 0) {
     setTime: (timeMs: number) => {
       nowMs = timeMs;
     },
+    advanceMonotonicBy: (deltaMs: number) => {
+      elapsedMs += Math.max(0, deltaMs);
+    },
     wake,
+    wakeDueToWallClock,
     get armedAtMs() {
       return armed?.atMs ?? null;
     },
