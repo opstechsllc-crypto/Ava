@@ -322,6 +322,11 @@ function shouldEarlyExitStoppedFree(
  * Gateway is coming up on this port. Service runtime status and listener PID
  * ownership are not required — a foreign listener with no service owner is
  * exactly the case where polling further wastes the operator-visible wait.
+ *
+ * Only affirmative foreign ownership exits: every listener must classify as
+ * SSH or a known non-Gateway. ``unknown`` means ownership was not identified
+ * — a Gateway whose process details are unavailable lands there — so probing
+ * continues rather than reporting a false diagnosis.
  */
 function shouldEarlyExitPortHeldByForeignListener(snapshot: GatewayRestartSnapshot): boolean {
   if (snapshot.portUsage.status !== "busy") {
@@ -333,10 +338,12 @@ function shouldEarlyExitPortHeldByForeignListener(snapshot: GatewayRestartSnapsh
   if (snapshot.runtime.status === "running") {
     return false;
   }
-  const gatewayOwnedListeners = snapshot.portUsage.listeners.filter(
-    (listener) => classifyPortListener(listener, snapshot.portUsage.port) === "gateway",
+  const kinds = new Set(
+    snapshot.portUsage.listeners.map((listener) =>
+      classifyPortListener(listener, snapshot.portUsage.port),
+    ),
   );
-  if (gatewayOwnedListeners.length > 0) {
+  if (kinds.has("gateway") || kinds.has("unknown")) {
     return false;
   }
   const runtimePid = snapshot.runtime.pid;
@@ -379,6 +386,14 @@ export async function waitForGatewayHealthyRestart(params: {
   includeUnknownListenersAsStale?: boolean;
   requireRunningService?: boolean;
   supervisorKeepsAlive?: boolean;
+  /**
+   * Diagnostic waits only (status/probe): report a foreign port holder
+   * immediately instead of polling to the deadline. Start, restart, update
+   * activation, and Doctor's repair path all wait for the Gateway they just
+   * launched, so they must keep waiting — a transient foreign-listener
+   * observation may not end those waits.
+   */
+  diagnosticPortHoldExit?: boolean;
   isStartupMigrationActive?: typeof hasActiveStartupMigrationLease;
   probeHosts?: readonly string[];
   signal?: AbortSignal;
@@ -470,7 +485,7 @@ export async function waitForGatewayHealthyRestart(params: {
     if (snapshot.staleGatewayPids.length > 0 && snapshot.runtime.status !== "running") {
       return withWaitContext(snapshot, "stale-pids", elapsedMs);
     }
-    if (shouldEarlyExitPortHeldByForeignListener(snapshot)) {
+    if (params.diagnosticPortHoldExit && shouldEarlyExitPortHeldByForeignListener(snapshot)) {
       return withWaitContext(snapshot, "port-held-foreign", elapsedMs);
     }
     // launchd KeepAlive can report a transient stopped state while its throttle window runs.
