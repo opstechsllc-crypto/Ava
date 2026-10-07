@@ -100,6 +100,10 @@ export async function abortControlledSubagents(params: {
     try {
       params.assertCurrent?.();
     } catch (error) {
+      // Without descendants, the caller owns the original authority exception.
+      if (runs.length === 0) {
+        throw error;
+      }
       commandErrors.push(error);
       return false;
     }
