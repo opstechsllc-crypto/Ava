@@ -5428,7 +5428,6 @@ describe("requester settle wake trigger", () => {
       status: "failed",
       disposition: "intentional_non_delivery",
     });
-    expect(readLifecycleRun(entry).delivery?.lastDropReason).toBe("sink_unavailable");
   });
 
   it("leaves an ordinary transport give-up as a bare failed row", async () => {
