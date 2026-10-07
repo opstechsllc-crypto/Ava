@@ -27,10 +27,6 @@ import type {
   ConversationRowsWorkerInput,
   ConversationRecord,
 } from "./conversation-registry.types.js";
-import type {
-  ArchivedSessionEvictionBatch,
-  ArchivedSessionEvictionQuery,
-} from "./disk-budget.types.js";
 import type { SessionGoalOperationLookupResult } from "./goals-operations.types.js";
 import type {
   SessionPendingArchivesWorkerInput,
@@ -78,6 +74,7 @@ import type {
 } from "./session-entry-read.types.js";
 import type * as HarnessCompletionSourceWorker from "./session-harness-completion-source.types.js";
 import type { PublishedSessionTranscriptArchive } from "./session-history-archive-pruning.types.js";
+import type * as EvictionWorker from "./session-history-eviction-worker.types.js";
 import type { SessionContextMessagesWorkerInput } from "./session-history-read.types.js";
 import type {
   ChatHistoryDisplayRequest,
@@ -310,19 +307,6 @@ type SessionBranchSummaryWorkerInput = {
   request: Omit<SessionBranchSummaryReadRequest, "database">;
 };
 
-type SessionHistoricalEvictionCandidatesWorkerInput = {
-  kind: "historical-eviction-candidates";
-  database: { agentId: string; path: string };
-  env: NodeJS.ProcessEnv;
-  admissionIdentities: readonly string[];
-  preserveRecentMs?: number | null;
-};
-
-type SessionArchivedEvictionCandidatesWorkerInput = Omit<
-  SessionHistoricalEvictionCandidatesWorkerInput,
-  "admissionIdentities" | "preserveRecentMs"
-> & { archived: ArchivedSessionEvictionQuery };
-
 type BoardReadWorkerInput<Kind extends string, Operation extends keyof BoardReadOperations> = {
   kind: Kind;
   database: { agentId: string; path: string };
@@ -343,8 +327,9 @@ export type SessionHistoryWorkerInput =
   | { kind: "cli-process-history"; request: ChatHistoryDisplayRequest }
   | LifecycleArtifactCleanupRequest
   | { kind: "prewarm"; database: { agentId: string; path: string }; env: NodeJS.ProcessEnv }
-  | SessionHistoricalEvictionCandidatesWorkerInput
-  | SessionArchivedEvictionCandidatesWorkerInput
+  | EvictionWorker.HistoricalInput
+  | EvictionWorker.ArchivedInput
+  | EvictionWorker.LiveInput
   | SessionArchivePruningWorkerInput
   | SessionPendingArchivesWorkerInput
   | SessionTranscriptInventoryWorkerInput
@@ -422,10 +407,8 @@ export type SessionTranscriptWorkerValues = SessionTranscriptInventoryWorkerValu
   prewarm: { kind: "prewarm" };
   "session-pending-archives": { kind: "session-pending-archives"; pending: boolean };
   "lifecycle-artifact-plan": LifecycleArtifactCleanupWorkerResult;
-  "historical-eviction-candidates": { kind: "historical-eviction-candidates" } & (
-    | { sessionIds: string[] }
-    | { batch: ArchivedSessionEvictionBatch }
-  );
+  "historical-eviction-candidates": EvictionWorker.HistoricalValue;
+  "live-eviction": EvictionWorker.LiveValue;
   "session-archive-pruning": {
     kind: "session-archive-pruning";
     result: PublishedSessionTranscriptArchive[];
@@ -578,14 +561,6 @@ export type SessionHistoryWorkerDatabase = SessionTranscriptInventoryReaders & {
   findTranscriptEvent: (
     request: SessionTranscriptMatchWorkerInput["request"],
   ) => Promise<{ event: TranscriptEvent } | undefined>;
-  readHistoricalEvictionCandidates: SessionHistoryReader<
-    SessionHistoricalEvictionCandidatesWorkerInput,
-    string[]
-  >;
-  readArchivedEvictionCandidates: SessionHistoryReader<
-    SessionArchivedEvictionCandidatesWorkerInput,
-    ArchivedSessionEvictionBatch
-  >;
   readArchivePruning: SessionHistoryReader<
     SessionArchivePruningWorkerInput,
     PublishedSessionTranscriptArchive[]
@@ -690,4 +665,4 @@ export type SessionHistoryWorkerDatabase = SessionTranscriptInventoryReaders & {
   >;
   readVoiceSessions: SessionHistoryReader<VoiceSessionsWorkerInput>;
   readUsageCache: SessionHistoryReader<SessionUsageCacheWorkerInput>;
-};
+} & EvictionWorker.Readers;
