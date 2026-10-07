@@ -157,6 +157,9 @@ async function syncPluginsForUpdateChannelWithLease(
         source: "path",
         sourcePath: bundledInfo.localPath,
         installPath: bundledInfo.localPath,
+        ...(bundledInfo.contextEngineIds
+          ? { contextEngineIdsByPlugin: { [pluginId]: [...bundledInfo.contextEngineIds] } }
+          : {}),
         spec: record.spec ?? bundledInfo.npmSpec,
         version: record.version,
       });
@@ -452,6 +455,9 @@ async function syncPluginsForUpdateChannelWithLease(
         source: "path",
         sourcePath: bundledInfo.localPath,
         installPath: bundledInfo.localPath,
+        ...(bundledInfo.contextEngineIds
+          ? { contextEngineIdsByPlugin: { [pluginId]: [...bundledInfo.contextEngineIds] } }
+          : {}),
         spec: record.spec ?? bundledInfo.npmSpec,
         version: record.version,
       });
