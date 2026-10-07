@@ -556,6 +556,7 @@ private fun AnnotatedString.Builder.appendInlineNode(
         withStyle(
           SpanStyle(
             fontFamily = FontFamily.Monospace,
+            fontStyle = FontStyle.Normal,
             background = styles.inlineCodeBg,
             color = styles.inlineCodeColor,
           ),
