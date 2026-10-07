@@ -520,6 +520,14 @@ describe("Bedrock prompt cache ownership", () => {
               timestamp: 2,
             },
           ],
+          // Tool blocks require a toolConfig on the request; this context sends one.
+          tools: [
+            {
+              name: "read",
+              description: "Read a file",
+              parameters: { type: "object", properties: {} },
+            },
+          ],
         } as never,
         { cacheRetention: "long" },
       );
@@ -704,6 +712,14 @@ describe("Bedrock tool-result images", () => {
             toolName: "read",
             content: [{ type: "text", text: "plain result" }],
             isError: false,
+          },
+        ],
+        // Tool blocks require a toolConfig on the request; this context sends one.
+        tools: [
+          {
+            name: "inspect",
+            description: "Inspect",
+            parameters: { type: "object", properties: {} },
           },
         ],
       };
