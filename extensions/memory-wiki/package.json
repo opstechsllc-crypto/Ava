@@ -37,7 +37,10 @@
     },
     "build": {
       "bundledDist": true,
-      "openclawVersion": "2026.9.8"
+      "openclawVersion": "2026.9.8",
+      "workerEntries": [
+        "./src/query-reader.worker.ts"
+      ]
     },
     "release": {
       "publishToClawHub": true,
