@@ -1,8 +1,10 @@
 import {
+  buildModelAliasIndex,
   loadPreparedModelCatalog,
   resolveAgentConfig,
   resolveAgentDir,
   resolveDefaultModelForAgent,
+  resolveModelRefFromString,
   resolveThinkingDefaultWithRuntimeCatalog,
 } from "openclaw/plugin-sdk/agent-runtime";
 import {
@@ -18,6 +20,7 @@ import {
   resolveStoredModelOverride,
 } from "openclaw/plugin-sdk/command-auth-native";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import { resolveChannelModelOverride } from "openclaw/plugin-sdk/model-session-runtime";
 import {
   getSessionEntry,
   resolveStorePath,
@@ -40,12 +43,45 @@ type TelegramCommandMenuModelContext = {
   fastMode?: SessionEntry["fastMode"];
 };
 
-function resolveTelegramCommandMenuModelContext(params: {
+type TelegramMenuModelParams = {
   cfg: OpenClawConfig;
   agentId: string;
   sessionKey: string;
   modelParentSessionKey?: null;
-}): TelegramCommandMenuModelContext {
+  chatId?: string;
+};
+
+/** What the next reply in an unpinned DM topic runs on: the channel's model, else the agent default. */
+function resolveTelegramUnpinnedTopicModel(params: TelegramMenuModelParams): {
+  provider: string;
+  model: string;
+} {
+  const defaultModel = resolveDefaultModelForAgent({ cfg: params.cfg, agentId: params.agentId });
+  const channelModel = resolveChannelModelOverride({
+    cfg: params.cfg,
+    channel: "telegram",
+    groupChatType: "direct",
+    directUserIds: [params.chatId],
+  });
+  const channelRef = channelModel
+    ? resolveModelRefFromString({
+        cfg: params.cfg,
+        agentId: params.agentId,
+        raw: channelModel.model,
+        defaultProvider: defaultModel.provider,
+        aliasIndex: buildModelAliasIndex({
+          cfg: params.cfg,
+          agentId: params.agentId,
+          defaultProvider: defaultModel.provider,
+        }),
+      })?.ref
+    : undefined;
+  return channelRef ?? { provider: defaultModel.provider, model: defaultModel.model };
+}
+
+function resolveTelegramCommandMenuModelContext(
+  params: TelegramMenuModelParams,
+): TelegramCommandMenuModelContext {
   if (!params.sessionKey.trim()) {
     return {};
   }
@@ -74,6 +110,9 @@ function resolveTelegramCommandMenuModelContext(params: {
           provider: override.provider || defaultModel.provider,
           model: override.model,
         };
+      } else if (params.modelParentSessionKey === null) {
+        // The row's last-run model may still be the DM pin this topic used to inherit.
+        context = resolveTelegramUnpinnedTopicModel(params);
       } else {
         const provider =
           normalizeOptionalString(entry?.providerOverride) ??
@@ -104,12 +143,10 @@ function resolveTelegramCommandMenuModelContext(params: {
   }
 }
 
-function resolveTelegramFastCommandModelContext(params: {
-  cfg: OpenClawConfig;
-  agentId: string;
-  sessionKey: string;
-  modelParentSessionKey?: null;
-}): { provider?: string; model?: string } {
+function resolveTelegramFastCommandModelContext(params: TelegramMenuModelParams): {
+  provider?: string;
+  model?: string;
+} {
   const defaultModel = resolveDefaultModelForAgent({ cfg: params.cfg, agentId: params.agentId });
   const fallback = () => ({ provider: defaultModel.provider, model: defaultModel.model });
   if (!params.sessionKey.trim()) {
@@ -128,6 +165,9 @@ function resolveTelegramFastCommandModelContext(params: {
       parentSessionKey: entry?.parentSessionKey ?? params.modelParentSessionKey,
       defaultProvider: defaultModel.provider,
     });
+    if (!override?.model && params.modelParentSessionKey === null) {
+      return resolveTelegramUnpinnedTopicModel(params);
+    }
     return {
       provider: override?.provider ?? defaultModel.provider,
       model: override?.model ?? defaultModel.model,
@@ -137,12 +177,7 @@ function resolveTelegramFastCommandModelContext(params: {
   }
 }
 
-function resolveTelegramFastCommandState(params: {
-  cfg: OpenClawConfig;
-  agentId: string;
-  sessionKey: string;
-  modelParentSessionKey?: null;
-}) {
+function resolveTelegramFastCommandState(params: TelegramMenuModelParams) {
   const defaultModel = resolveDefaultModelForAgent({ cfg: params.cfg, agentId: params.agentId });
   const fallback = () =>
     resolveFastModeState({
@@ -261,6 +296,7 @@ export async function executeTelegramBuiltinCommand(
         agentId: dispatch.route.agentId,
         sessionKey: dispatch.targetSessionKey,
         modelParentSessionKey: dispatch.modelParentSessionKey,
+        chatId: String(dispatch.msg.chat.id),
       }).provider ??
       resolveDefaultModelForAgent({
         cfg: dispatch.runtimeCfg,
@@ -285,6 +321,7 @@ export async function executeTelegramBuiltinCommand(
     agentId: dispatch.route.agentId,
     sessionKey: menuNeedsModelContext ? dispatch.targetSessionKey : "",
     modelParentSessionKey: dispatch.modelParentSessionKey,
+    chatId: String(dispatch.msg.chat.id),
   };
   const fastCommandState =
     commandDefinition.key === "fast" && menuNeedsModelContext
