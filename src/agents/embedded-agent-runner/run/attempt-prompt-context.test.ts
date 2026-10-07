@@ -86,6 +86,7 @@ function createPrompt(overrides?: Partial<PromptInput>): PromptInput {
   return {
     effectivePrompt: "Visible request",
     effectiveTranscriptPrompt: "Visible request",
+    routePromptBuildContextThroughRuntimeCarrier: false,
     ...overrides,
   };
 }
@@ -320,6 +321,95 @@ describe("prepareEmbeddedAttemptPromptContext", () => {
       expect(result.runtimeContextMessageForCurrentTurn?.content).not.toContain("saved preference");
     },
   );
+
+  it("routes hook prompt context through the stored carrier on append-only models", async () => {
+    const hookPrepend = "<plugin-context>\nper-run memory nonce\n</plugin-context>";
+    const fixture = createInput({
+      prompt: createPrompt({
+        routePromptBuildContextThroughRuntimeCarrier: true,
+        promptBuildPrependContext: hookPrepend,
+      }),
+    });
+    const result = await prepareEmbeddedAttemptPromptContext({
+      ...fixture.input,
+      appendOnlyRuntimeContext: true,
+    });
+    // The user turn stays transcript-identical; the hook text rides the carrier
+    // so the next replay includes it byte-for-byte.
+    expect(result.promptForSession).toBe("Visible request");
+    expect(result.promptForModel).toBe("Visible request");
+    expect(result.llmBoundaryPromptForPrecheck).toBe("Visible request");
+    expect(result.runtimeContextMessageForCurrentTurn?.details.fragments).toContainEqual({
+      kind: "conversation-data",
+      text: hookPrepend,
+    });
+    expect(result.runtimeContextMessageForCurrentTurn?.content).toContain("per-run memory nonce");
+  });
+
+  it("joins hook prepend and append context in one carrier fragment in order", async () => {
+    const fixture = createInput({
+      prompt: createPrompt({
+        routePromptBuildContextThroughRuntimeCarrier: true,
+        promptBuildPrependContext: "prepend part",
+        promptBuildAppendContext: "append part",
+      }),
+    });
+    const result = await prepareEmbeddedAttemptPromptContext({
+      ...fixture.input,
+      appendOnlyRuntimeContext: true,
+    });
+    expect(result.runtimeContextMessageForCurrentTurn?.details.fragments).toContainEqual({
+      kind: "conversation-data",
+      text: "prepend part\n\nappend part",
+    });
+  });
+
+  it("routes hook prompt context through the carrier when the transcript prompt is empty", async () => {
+    const hookPrepend = "<plugin-context>\nper-run memory nonce\n</plugin-context>";
+    const fixture = createInput({
+      prompt: createPrompt({
+        effectivePrompt: "Runtime ask",
+        effectiveTranscriptPrompt: "",
+        routePromptBuildContextThroughRuntimeCarrier: true,
+        promptBuildPrependContext: hookPrepend,
+      }),
+    });
+    const result = await prepareEmbeddedAttemptPromptContext({
+      ...fixture.input,
+      appendOnlyRuntimeContext: true,
+    });
+    // Runtime-only turns still deliver hook context: assembly's routing decision
+    // is the single source of truth, so the carrier carries it instead of the
+    // transcript prompt and submission both dropping it.
+    expect(result.promptSubmission.runtimeOnly).toBe(true);
+    expect(result.promptForModel).toBe("Runtime ask");
+    expect(result.promptForSession).not.toContain("per-run memory nonce");
+    expect(result.runtimeContextMessageForCurrentTurn?.details.fragments).toContainEqual({
+      kind: "conversation-data",
+      text: hookPrepend,
+    });
+    expect(result.runtimeContextMessageForCurrentTurn?.content).toContain("per-run memory nonce");
+  });
+
+  it("keeps hook prompt context out of the carrier when append-only runtime context is off", async () => {
+    const fixture = createInput({
+      prompt: createPrompt({
+        effectivePrompt: "Plugin context\n\nVisible request",
+        effectiveTranscriptPrompt: "Visible request",
+        promptBuildPrependContext: "Plugin context",
+      }),
+    });
+    const result = await prepareEmbeddedAttemptPromptContext(fixture.input);
+    expect(result.promptForModel).toBe("Plugin context\n\nVisible request");
+    expect(result.promptForSession).toBe("Visible request");
+    expect(result.runtimeContextMessageForCurrentTurn?.content ?? "").not.toContain(
+      "Plugin context",
+    );
+    expect(result.runtimeContextMessageForCurrentTurn?.details.fragments ?? []).not.toContainEqual({
+      kind: "conversation-data",
+      text: "Plugin context",
+    });
+  });
 
   it("keeps the transcript prompt bare while carrying inbound context to hooks", async () => {
     const fixture = createInput();
