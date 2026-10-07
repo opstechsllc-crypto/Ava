@@ -571,31 +571,42 @@ export function closeOpenClawStateDatabaseByPath(
   pathname: string,
   options?: OpenClawStateDatabaseCloseOptions,
 ): boolean {
+  const resolvedPath = path.resolve(pathname);
   return retireOpenClawStateDatabaseHandles(
-    path.resolve(pathname),
+    resolvedPath,
     options,
-    asyncResources.identity(pathname),
+    // A cached owner already identifies the exact handle; avoid opening a read worker.
+    cachedDatabases.has(resolvedPath) ? undefined : asyncResources.identity(pathname),
   );
 }
 
-/** Close all cached shared state database handles. */
+export async function retireOpenClawStateDatabaseCacheOwnerByPath(
+  pathname: string,
+  options?: OpenClawStateDatabaseCloseOptions,
+): Promise<boolean> {
+  const database = cachedDatabases.get(path.resolve(pathname));
+  if (!database) {
+    return false;
+  }
+  await stopOpenClawStateDatabaseMaintenance(database.path);
+  retireOpenClawStateDatabaseHandle(database, false, options);
+  return true;
+}
+
 export function closeOpenClawStateDatabase(options?: OpenClawStateDatabaseCloseOptions): void {
   retireOpenClawStateDatabaseHandles(undefined, options);
 }
 
-/** Register a resource owner before it can admit any shared-state worker opens. */
 export function registerOpenClawStateDatabaseAsyncResource(
   resource: OpenClawStateDatabaseAsyncResource,
 ): () => void {
   return asyncResources.register(resource);
 }
 
-/** Capture the canonical read generation before any asynchronous worker admission. */
 export const captureOpenClawStateDatabaseReadAdmission = asyncResources.capture;
 
 export const captureOpenClawStateIntegrityAdmission = asyncResources.integrity;
 
-/** Bind worker-created storage to its captured admission without publishing a native handle. */
 export function publishOpenClawStateDatabaseWorkerAdmission(
   admission: OpenClawStateDatabaseReadAdmission,
 ): void {
