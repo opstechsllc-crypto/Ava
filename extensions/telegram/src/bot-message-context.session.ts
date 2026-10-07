@@ -238,6 +238,7 @@ export async function buildTelegramInboundContextPayload(params: {
   dmThreadId?: number;
   threadSpec: TelegramThreadSpec;
   route: ResolvedAgentRoute;
+  modelParentSessionKey?: null;
   bodyResult: NonNullable<Awaited<ReturnType<typeof resolveTelegramInboundBody>>>;
   historyLimit: number;
   dmHistoryLimit: number;
@@ -280,6 +281,7 @@ export async function buildTelegramInboundContextPayload(params: {
     dmThreadId,
     threadSpec,
     route,
+    modelParentSessionKey,
     historyLimit,
     dmHistoryLimit,
     groupConfig,
@@ -641,6 +643,7 @@ export async function buildTelegramInboundContextPayload(params: {
     route: {
       ...route,
       routeSessionKey: route.sessionKey,
+      modelParentSessionKey,
       mainSessionKey: route.mainSessionKey,
     },
     reply: {

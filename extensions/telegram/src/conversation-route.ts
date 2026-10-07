@@ -255,7 +255,7 @@ export function resolveTelegramTargetSession(params: {
   senderId?: string | number | null;
   dmThreadId?: number;
   botHasTopicsEnabled?: boolean;
-}): string {
+}): { sessionKey: string; modelParentSessionKey?: null } {
   const baseSessionKey = resolveTelegramConversationBaseSessionKey(params);
   const threadKeys =
     shouldUseTelegramDmThreadSession(params) && params.dmThreadId != null
@@ -264,5 +264,8 @@ export function resolveTelegramTargetSession(params: {
           threadId: `${params.chatId}:${params.dmThreadId}`,
         })
       : null;
-  return threadKeys?.sessionKey ?? baseSessionKey;
+  // The thread suffix's base is the whole DM (or main) session, not a parent conversation.
+  return threadKeys
+    ? { sessionKey: threadKeys.sessionKey, modelParentSessionKey: null }
+    : { sessionKey: baseSessionKey };
 }

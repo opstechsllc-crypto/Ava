@@ -333,7 +333,7 @@ export const buildTelegramMessageContext = async ({
     return false;
   };
 
-  const sessionKey = resolveTelegramTargetSession({
+  const { sessionKey, modelParentSessionKey } = resolveTelegramTargetSession({
     cfg,
     route,
     chatId,
@@ -448,6 +448,7 @@ export const buildTelegramMessageContext = async ({
     dmThreadId,
     threadSpec,
     route,
+    modelParentSessionKey,
     bodyResult,
     historyLimit,
     dmHistoryLimit,

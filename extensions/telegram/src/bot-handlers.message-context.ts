@@ -176,7 +176,7 @@ export function createTelegramMessageSessionRuntime({
       senderId: params.senderId,
       topicAgentId: topicConfig?.agentId,
     });
-    const sessionKey = resolveTelegramTargetSession({
+    const { sessionKey, modelParentSessionKey } = resolveTelegramTargetSession({
       cfg: params.runtimeCfg,
       route,
       chatId: params.chatId,
@@ -194,6 +194,7 @@ export function createTelegramMessageSessionRuntime({
       loadSessionEntry: (parentSessionKey) =>
         loadSessionEntry({ storePath, sessionKey: parentSessionKey }),
       sessionKey,
+      parentSessionKey: entry?.parentSessionKey ?? modelParentSessionKey,
       defaultProvider: resolveDefaultModelForAgent({
         cfg: params.runtimeCfg,
         agentId: route.agentId,
