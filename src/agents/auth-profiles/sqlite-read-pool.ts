@@ -14,6 +14,7 @@ import {
 import { openNodeSqliteDatabase } from "../../infra/node-sqlite.js";
 import { isPathInside } from "../../infra/path-guards.js";
 import { setSqliteBusyTimeout } from "../../infra/sqlite-busy-timeout.js";
+import { retainSnapshotTempDirectory } from "../../infra/sqlite-readonly-location-cleanup.js";
 import { readSqliteUserVersion } from "../../infra/sqlite-user-version.js";
 import {
   registerSqliteCacheExitClose,
@@ -27,6 +28,7 @@ const AUTH_PROFILE_READ_IDLE_MS = 30 * 60_000;
 type AuthProfileReadHandle = {
   db: DatabaseSync;
   ready: boolean;
+  releaseSnapshot?: () => void;
   idleTimer?: ReturnType<typeof setTimeout>;
 };
 const authProfileReadDatabases = new Map<string, AuthProfileReadHandle>();
@@ -46,6 +48,8 @@ export function closeAuthProfileReadDatabase(databasePath: string): void {
   if (entry.db.isOpen) {
     entry.db.close();
   }
+  entry.releaseSnapshot?.();
+  entry.releaseSnapshot = undefined;
   clearTimeout(entry.idleTimer);
   entry.idleTimer = undefined;
   // Failed closes remain owned so scoped disposal can retain the root and retry.
@@ -116,12 +120,16 @@ export function isMissingDatabasePath(pathname: string): boolean {
 
 export function acquireAuthProfileReadDatabase(
   pathname: string,
+  snapshotRoot?: string,
 ): { status: "missing" } | { status: "unreadable" } | { status: "readable"; db: DatabaseSync } {
   const resolvedPath = path.resolve(pathname);
   if (isDeletedAgentDatabasePath(resolvedPath)) {
     return { status: "missing" };
   }
   const cached = authProfileReadDatabases.get(resolvedPath);
+  if (cached && snapshotRoot && !cached.releaseSnapshot) {
+    cached.releaseSnapshot = retainSnapshotTempDirectory(snapshotRoot);
+  }
   if (cached?.ready && cached.db.isOpen) {
     authProfileReadDatabases.delete(resolvedPath);
     authProfileReadDatabases.set(resolvedPath, cached);
@@ -138,13 +146,16 @@ export function acquireAuthProfileReadDatabase(
       closeAuthProfileReadDatabase(pendingPath);
     }
   }
+  // Native open/admission failures can retain a handle; its pool entry owns the copy.
+  const releaseSnapshot = snapshotRoot ? retainSnapshotTempDirectory(snapshotRoot) : undefined;
   let db: DatabaseSync;
   try {
     db = openNodeSqliteDatabase(resolvedPath, { readOnly: true });
   } catch {
+    releaseSnapshot?.();
     return isMissingDatabasePath(resolvedPath) ? { status: "missing" } : { status: "unreadable" };
   }
-  const candidate: AuthProfileReadHandle = { db, ready: false };
+  const candidate: AuthProfileReadHandle = { db, ready: false, releaseSnapshot };
   authProfileReadDatabases.set(resolvedPath, candidate);
   unregisterReadHandleExitClose ??= registerSqliteCacheExitClose(closeAuthProfileReadPool);
   armReadHandleIdleClose(resolvedPath, candidate);

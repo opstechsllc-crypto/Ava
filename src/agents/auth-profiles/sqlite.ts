@@ -35,11 +35,7 @@ import {
   writeAuthProfileJsonCell,
   deleteAuthProfileJsonCell,
 } from "./sqlite-json.js";
-import {
-  acquireAuthProfileReadDatabase,
-  closeAuthProfileReadPool,
-  isMissingDatabasePath,
-} from "./sqlite-read-pool.js";
+import { acquireAuthProfileReadDatabase, closeAuthProfileReadPool } from "./sqlite-read-pool.js";
 import type {
   AuthProfileStoreOwner,
   PersistedAuthProfileStoreInspection,
@@ -185,18 +181,18 @@ export function inspectAuthProfileJsonCellReadOnly(
   target: "store" | "state",
 ): PersistedAuthProfileStoreInspection {
   if (databaseTarget.kind === "shared-state") {
-    try {
-      return (
-        withExistingOpenClawStateDatabaseReadOnly(
-          ({ db }) => inspectAuthProfileJsonCell(db, target, "shared-state"),
-          { path: databaseTarget.path, ...(databaseTarget.env ? { env: databaseTarget.env } : {}) },
-        ) ?? { status: "missing", reason: "database" }
-      );
-    } catch {
-      return isMissingDatabasePath(databaseTarget.path)
-        ? { status: "missing", reason: "database" }
-        : { status: "unreadable" };
-    }
+    return (
+      withExistingOpenClawStateDatabaseReadOnly(
+        ({ db }) => {
+          try {
+            return inspectAuthProfileJsonCell(db, target, "shared-state");
+          } catch {
+            return { status: "unreadable" } as const;
+          }
+        },
+        { path: databaseTarget.path, ...(databaseTarget.env ? { env: databaseTarget.env } : {}) },
+      ) ?? { status: "missing", reason: "database" }
+    );
   }
   return inspectAgentAuthProfileJsonCellReadOnly(databaseTarget.path, target);
 }
