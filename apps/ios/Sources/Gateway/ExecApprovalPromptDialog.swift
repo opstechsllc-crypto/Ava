@@ -215,7 +215,7 @@ private struct ExecApprovalPromptCard: View {
                             .font(OpenClawType.subheadSemiBold)
                             .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.borderedProminent)
+                    .openClawProminentButton()
                     .disabled(self.isResolving)
                 }
 

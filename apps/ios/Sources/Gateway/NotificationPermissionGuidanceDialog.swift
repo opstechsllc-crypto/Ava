@@ -70,7 +70,7 @@ private struct NotificationPermissionGuidanceCard: View {
                         .font(OpenClawType.subheadSemiBold)
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.borderedProminent)
+                .openClawProminentButton()
 
                 Button(role: .cancel) {
                     self.onDismiss()
