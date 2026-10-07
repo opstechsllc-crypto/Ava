@@ -4,6 +4,7 @@ import {
 } from "@openclaw/normalization-core/string-coerce";
 import { normalizeOptionalTrimmedStringList } from "@openclaw/normalization-core/string-normalization";
 import { resolveFastModeState } from "../../agents/fast-mode.js";
+import { getPreparedModelRuntimePluginGeneration } from "../../agents/prepared-model-runtime-generation-scope.js";
 import { resolveCandidateThinkingLevel } from "../../agents/thinking-runtime.js";
 import { normalizeChatType } from "../../channels/chat-type.js";
 import { getChannelPlugin } from "../../channels/plugins/index.js";
@@ -23,6 +24,7 @@ import {
   selectApplicableRuntimeConfig,
   type OpenClawConfig,
 } from "../../config/config.js";
+import { resolvePublishedRuntimeConfig } from "../../config/runtime-snapshot.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import {
   isTrustedMessageActionTurnIngress,
@@ -53,12 +55,18 @@ type EmbeddedReplyRoute = Pick<
 >;
 
 export function resolveQueuedReplyRuntimeConfig(config: OpenClawConfig): OpenClawConfig {
+  // An already-admitted turn keeps its retained config paired with its plugin
+  // generation lease; rebinding to a newer publication would split them and fail
+  // the nested borrow. Queue drains run outside the generation scope and rebind.
+  const admittedGeneration = getPreparedModelRuntimePluginGeneration();
   return (
+    (admittedGeneration ? null : resolvePublishedRuntimeConfig(config)) ??
     selectApplicableRuntimeConfig({
       inputConfig: config,
       runtimeConfig: getRuntimeConfigSnapshot(),
       runtimeSourceConfig: getRuntimeConfigSourceSnapshot(),
-    }) ?? config
+    }) ??
+    config
   );
 }
 
