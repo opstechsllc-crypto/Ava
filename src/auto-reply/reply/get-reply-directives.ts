@@ -1,7 +1,6 @@
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalLowercaseString,
-  normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
 import { listAgentEntries } from "../../agents/agent-scope.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../agents/defaults.js";
@@ -40,6 +39,7 @@ import { resolveBlockStreamingChunking } from "./block-streaming.js";
 import { buildCommandContext } from "./commands-context.js";
 import { resolveReplyDirectiveCommand } from "./directive-handling.parse.js";
 import {
+  listConfiguredDirectiveAliases,
   reserveSkillCommandNames,
   resolveConfiguredDirectiveAliases,
 } from "./get-reply-directive-aliases.js";
@@ -153,10 +153,7 @@ export async function resolveReplyDirectives(params: {
     allowTextCommands && command.isAuthorizedSender && ctx.CommandInterpretationSuppressed !== true;
   const commandTextHasSlash = commandText.includes("/");
   const hasConfiguredModelAliases =
-    commandTextHasSlash &&
-    Object.values(cfg.agents?.defaults?.models ?? {}).some((entry) =>
-      Boolean(normalizeOptionalString(entry.alias)),
-    );
+    commandTextHasSlash && listConfiguredDirectiveAliases(cfg, agentId).length > 0;
   const hasSkillReferences =
     canInterpretTextDirectives && hasSkillReferenceCandidate(command.commandBodyNormalized);
   const reservedCommands = new Set<string>();
@@ -172,6 +169,7 @@ export async function resolveReplyDirectives(params: {
   const rawAliases = hasConfiguredModelAliases
     ? resolveConfiguredDirectiveAliases({
         cfg,
+        agentId,
         commandTextHasSlash,
         reservedCommands,
       })
