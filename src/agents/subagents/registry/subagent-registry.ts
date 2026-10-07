@@ -631,6 +631,7 @@ const publicApi = createSubagentRegistryPublicApi({
   startAnnounceCleanup: startSubagentAnnounceCleanupFlow,
   settleRequesterTurn: settleRequesterTurnAfterSessionSpawns,
   markRequesterYielded: subagentLifecycleController.markRequesterTurnYielded,
+  discardTerminalDelivery: SubagentLifecycleController.discardTerminalDelivery,
 });
 
 export const leasePendingAgentSteeringItems = publicApi.leasePendingAgentSteeringItems;
@@ -656,6 +657,7 @@ export const settleRequesterAfterSessionSpawns = publicApi.settleRequesterAfterS
 export const markRequesterTurnYielded = publicApi.markRequesterTurnYielded;
 export const claimSubagentYield = publicApi.claimSubagentYield;
 export const listUnsettledRequesterChildren = publicApi.listUnsettledRequesterChildren;
+export const dismissSubagentRunDelivery = publicApi.dismissSubagentRunDelivery;
 export type { UnsettledRequesterChild } from "./subagent-registry-requester-yield.js";
 
 export const adoptSubagentRunForRequesterTurn =
