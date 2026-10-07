@@ -15,6 +15,7 @@ import {
   cleanupSessionLifecycleArtifacts,
   deleteSessionEntry,
   getSessionEntry,
+  getSessionEntryAsync,
   listSessionEntries,
   patchSessionEntry,
   readSessionUpdatedAt,
@@ -106,6 +107,11 @@ describe("session-store-runtime", () => {
     });
 
     expect(getSessionEntry({ sessionKey, storePath })).toMatchObject({
+      model: "gpt-5.5",
+      sessionId: "session-1",
+      updatedAt: 10,
+    });
+    await expect(getSessionEntryAsync({ sessionKey, storePath })).resolves.toMatchObject({
       model: "gpt-5.5",
       sessionId: "session-1",
       updatedAt: 10,

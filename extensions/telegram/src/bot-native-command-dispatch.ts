@@ -26,6 +26,7 @@ import {
   resolveTelegramGroupAllowFromContext,
   resolveTelegramMessageThreadSpec,
 } from "./bot/helpers.js";
+import { isTelegramCommandAddressed } from "./command-mention-gate.js";
 import {
   inspectTelegramConversationRoute,
   resolveTelegramTargetSession,
@@ -79,6 +80,7 @@ export type TelegramCommandExecutorParams = {
     | "botInfo"
     | "allowFrom"
     | "groupAllowFrom"
+    | "requireMention"
     | "replyToMode"
     | "accountAbortSignal"
   >;
@@ -142,6 +144,7 @@ async function resolveTelegramCommandAuth(params: {
   groupAllowFrom?: Array<string | number>;
   resolveGroupPolicy: TelegramCommandExecutorParams["resolveGroupPolicy"];
   resolveTelegramGroupConfig: TelegramCommandExecutorParams["resolveTelegramGroupConfig"];
+  opts: TelegramCommandExecutorParams["opts"];
   requireAuth: boolean;
 }) {
   const { msg, bot, cfg, accountId, telegramCfg, requireAuth } = params;
@@ -169,6 +172,21 @@ async function resolveTelegramCommandAuth(params: {
     dmThreadId: threadSpec.scope === "dm" ? threadSpec.id : undefined,
     botHasTopicsEnabled: resolveTelegramBotHasTopicsEnabled(params.botUser),
   });
+  if (
+    !(await isTelegramCommandAddressed({
+      cfg,
+      accountId,
+      msg,
+      botUsername: params.botUser?.username,
+      botId: params.botUser?.id,
+      threadSpec,
+      requireMentionOverride: params.opts.requireMention,
+      ownerAgentId: params.opts.ownerAgentId,
+    }))
+  ) {
+    logVerbose(`Blocked unmentioned telegram command in group ${chatId}`);
+    return null;
+  }
   const ownerContext = await buildTelegramNativeCommandOwnerContext({
     cfg,
     accountId,
@@ -368,6 +386,7 @@ export async function prepareTelegramCommandDispatch(
     groupAllowFrom: turnSettings.groupAllowFrom,
     resolveGroupPolicy: params.resolveGroupPolicy,
     resolveTelegramGroupConfig: params.resolveTelegramGroupConfig,
+    opts: params.opts,
     requireAuth: params.requireAuth,
   });
   if (!auth) {
