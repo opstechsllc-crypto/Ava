@@ -10,6 +10,7 @@ export function gateBoundTool(
   tool: AnyAgentTool,
   assertActive: () => void,
   observeResult: (result: unknown) => void,
+  beforeExecution?: Promise<unknown>,
 ): AnyAgentTool {
   const execute = tool.execute;
   const sourcePreparer = getInternalToolExecutionPreparer(tool);
@@ -27,6 +28,9 @@ export function gateBoundTool(
       ? {
           execute: async (...args: Parameters<NonNullable<AnyAgentTool["execute"]>>) => {
             try {
+              if (beforeExecution) {
+                await beforeExecution;
+              }
               assertActive();
             } catch (error) {
               // This gate precedes dispatch; a revoked owner must not look like
@@ -39,10 +43,13 @@ export function gateBoundTool(
       : {}),
   };
   copyAgentToolMetadata(tool, gated, (source) =>
-    gateBoundTool(source, assertActive, observeResult),
+    gateBoundTool(source, assertActive, observeResult, beforeExecution),
   );
   if (sourcePreparer) {
     attachInternalToolExecutionPreparer(gated, async (preparationParams) => {
+      if (beforeExecution) {
+        await beforeExecution;
+      }
       assertActive();
       const prepared = await sourcePreparer(preparationParams);
       try {
