@@ -41,6 +41,7 @@ import {
   createMessageToolDecisionRecorder,
   resolveTrustedDecisionChannel,
 } from "./message-tool-decision.js";
+import { resolveMessageToolDeliveryContext } from "./message-tool-delivery-context.js";
 import {
   buildMessageToolDescription,
   buildMessageToolSchema,
@@ -143,12 +144,12 @@ export function createMessageTool(options?: MessageToolOptions): AnyAgentTool {
   const inferredCurrentChannel = resolveEffectiveCurrentChannelContext(options);
   const preparedMessageToolCatalog =
     options?.preparedMessageToolCatalog ?? getPreparedMessageToolCatalog();
-  const currentThreadTs =
+  const fallbackCurrentThreadTs =
     options?.currentThreadTs ??
     (options?.agentThreadId != null
       ? stringifyRouteThreadId(options.agentThreadId)
       : inferredCurrentChannel.currentThreadTs);
-  const replyToMode = options?.replyToMode ?? (currentThreadTs ? "all" : undefined);
+  const replyToMode = options?.replyToMode ?? (fallbackCurrentThreadTs ? "all" : undefined);
   const agentAccountId =
     resolveAgentAccountId(options?.agentAccountId) ?? inferredCurrentChannel.accountId;
   const sourceReplySinkDeliveryMode = resolveSourceReplySinkDeliveryMode(
@@ -183,7 +184,7 @@ export function createMessageTool(options?: MessageToolOptions): AnyAgentTool {
           currentChatType: inferredCurrentChannel.currentChatType,
           currentChannelProvider: inferredCurrentChannel.currentChannelProvider,
           currentChannelId: inferredCurrentChannel.currentChannelId,
-          currentThreadTs,
+          currentThreadTs: fallbackCurrentThreadTs,
           currentMessageId: options.currentMessageId,
           currentAccountId: agentAccountId,
           scheduledAccountScope: turnAuthority.scheduledAccountScope,
@@ -262,14 +263,20 @@ export function createMessageTool(options?: MessageToolOptions): AnyAgentTool {
         gatewayTurnCapability,
       } = turnAuthority.beginInvocation(action);
       const messageActionAuthorization: MessageActionAuthorization = trustedTurnContext ?? {};
+      const currentContext = trustedTurnContext?.toolContext ?? options;
       const requestedAccountId = readToolStringParam(params, "accountId");
-      const effectiveCurrentChannel = resolveEffectiveCurrentChannelContext(options, {
-        config: rawConfig,
-        action,
-        params,
-        accountId: requestedAccountId ?? agentAccountId,
-        preparedMessageToolCatalog,
-      });
+      const currentThreadTs = trustedTurnContext?.toolContext
+        ? trustedTurnContext.toolContext.currentThreadTs
+        : fallbackCurrentThreadTs;
+      const effectiveCurrentChannel =
+        trustedTurnContext?.toolContext ??
+        resolveEffectiveCurrentChannelContext(options, {
+          config: rawConfig,
+          action,
+          params,
+          accountId: requestedAccountId ?? agentAccountId,
+          preparedMessageToolCatalog,
+        });
       const decisions = createMessageToolDecisionRecorder({
         actionId: toolCallId,
         action,
@@ -309,7 +316,7 @@ export function createMessageTool(options?: MessageToolOptions): AnyAgentTool {
             currentChannelId: effectiveCurrentChannel.currentChannelId,
             currentMessagingTarget: effectiveCurrentChannel.currentMessagingTarget,
             currentThreadTs,
-            currentMessageId: options.currentMessageId,
+            currentMessageId: currentContext?.currentMessageId,
             currentAccountId: agentAccountId,
             trustedTurnContext,
           }),
@@ -480,36 +487,17 @@ export function createMessageTool(options?: MessageToolOptions): AnyAgentTool {
         }
       }
 
-      const hasCurrentMessageId =
-        typeof options?.currentMessageId === "number" ||
-        (typeof options?.currentMessageId === "string" &&
-          options.currentMessageId.trim().length > 0);
-
-      const toolContext =
-        effectiveCurrentChannel.currentChannelId ||
-        effectiveCurrentChannel.currentChatType ||
-        effectiveCurrentChannel.currentChannelProvider ||
-        effectiveCurrentChannel.currentMessagingTarget ||
-        currentThreadTs ||
-        hasCurrentMessageId ||
-        replyToMode ||
-        options?.hasRepliedRef ||
-        options?.sameChannelThreadRequired
-          ? {
-              currentChannelId: effectiveCurrentChannel.currentChannelId,
-              currentChatType: effectiveCurrentChannel.currentChatType,
-              currentMessagingTarget: effectiveCurrentChannel.currentMessagingTarget,
-              currentChannelProvider: effectiveCurrentChannel.currentChannelProvider,
-              currentThreadTs,
-              currentMessageId: options?.currentMessageId,
-              replyToMode,
-              hasRepliedRef: options?.hasRepliedRef,
-              sameChannelThreadRequired: options?.sameChannelThreadRequired,
-              // Direct tool invocations should not add cross-context decoration.
-              // The agent is composing a message, not forwarding from another chat.
-              skipCrossContextDecoration: true,
-            }
-          : undefined;
+      const toolContext = resolveMessageToolDeliveryContext(trustedTurnContext?.toolContext, {
+        currentChannelId: effectiveCurrentChannel.currentChannelId,
+        currentChatType: effectiveCurrentChannel.currentChatType,
+        currentMessagingTarget: effectiveCurrentChannel.currentMessagingTarget,
+        currentChannelProvider: effectiveCurrentChannel.currentChannelProvider,
+        currentThreadTs,
+        currentMessageId: options?.currentMessageId,
+        replyToMode,
+        hasRepliedRef: options?.hasRepliedRef,
+        sameChannelThreadRequired: options?.sameChannelThreadRequired,
+      });
       const groupThread = prepareMessageToolGroupThread(params, {
         action,
         channel: scope.channel,
