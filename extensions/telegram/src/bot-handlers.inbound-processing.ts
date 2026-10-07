@@ -48,6 +48,7 @@ import {
   resolveTelegramPrimaryMedia,
 } from "./bot/helpers.js";
 import type { TelegramContext } from "./bot/types.js";
+import { isTelegramCommandAddressed } from "./command-mention-gate.js";
 import { resolveTelegramCommandIngressAuthorization } from "./ingress.js";
 import { isTelegramControlLaneText } from "./sequential-key.js";
 
@@ -149,7 +150,19 @@ export function createTelegramInboundProcessing({
           }).then((gate) => gate.authorized)
         : Promise.resolve(false);
 
-    if (await abortControlAuthorized) {
+    if (
+      (await abortControlAuthorized) &&
+      (await isTelegramCommandAddressed({
+        cfg: authorizationCfg,
+        accountId,
+        msg,
+        botUsername,
+        botId: ctx.me?.id,
+        threadSpec,
+        requireMentionOverride: handlerParams.opts.requireMention,
+        ownerAgentId: handlerParams.ownerAgentId,
+      }))
+    ) {
       cancelPending({ chatId, threadSpec, senderId });
     }
 
