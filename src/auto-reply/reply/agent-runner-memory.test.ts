@@ -83,6 +83,7 @@ const {
   incrementCompactionCountMock,
   registerAgentRunContextMock,
   clearAgentRunContextMock,
+  preflightCompactionWarnMock,
 } = vi.hoisted(() => ({
   compactEmbeddedAgentSessionMock: vi.fn(),
   runEmbeddedAgentEntryMock: vi.fn(),
@@ -91,10 +92,23 @@ const {
   incrementCompactionCountMock: vi.fn(),
   registerAgentRunContextMock: vi.fn(),
   clearAgentRunContextMock: vi.fn(),
+  preflightCompactionWarnMock: vi.fn(),
 }));
 const runWithModelFallbackMock = vi.fn();
 const ensureSelectedAgentHarnessPluginMock = vi.fn();
 
+vi.mock("../../logging/subsystem.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../logging/subsystem.js")>();
+  return {
+    ...actual,
+    createSubsystemLogger: (...args: Parameters<typeof actual.createSubsystemLogger>) => {
+      const logger = actual.createSubsystemLogger(...args);
+      return args[0] === "auto-reply/preflight-compaction"
+        ? { ...logger, warn: preflightCompactionWarnMock }
+        : logger;
+    },
+  };
+});
 vi.mock("../../agents/embedded-agent-runner/run-entry.js", () => ({
   runEmbeddedAgentEntry: runEmbeddedAgentEntryMock,
 }));
@@ -389,6 +403,7 @@ describe("runMemoryFlushIfNeeded", () => {
     rootDir = path.join(suiteRoot, `case-${++caseCount}`);
     await fs.mkdir(rootDir);
     registerMemoryFlushPlanResolverForTest(createMemoryFlushPlan);
+    preflightCompactionWarnMock.mockClear();
     runWithModelFallbackMock.mockReset().mockImplementation(async ({ provider, model, run }) => ({
       result: await run(provider, model, {
         modelRoutingProvenance: modelRoutingProvenance(provider, model),
@@ -1327,9 +1342,12 @@ describe("runMemoryFlushIfNeeded", () => {
     expect(compactEmbeddedAgentSessionMock).toHaveBeenCalled();
   });
 
-  it.each(["plugin already stored this turn", "deferred to background context-engine maintenance"])(
+  it.each([
+    ["plugin already stored this turn", "unknown"],
+    ["deferred to background context-engine maintenance", "deferred_background"],
+  ])(
     "fails required preflight compaction for a successful no-op: %s",
-    async (reason) => {
+    async (reason, reasonClass) => {
       compactEmbeddedAgentSessionMock.mockResolvedValueOnce({
         ok: true,
         compacted: false,
@@ -1351,6 +1369,14 @@ describe("runMemoryFlushIfNeeded", () => {
         }),
       ).rejects.toThrow(`Preflight compaction required but failed: ${reason}`);
 
+      expect(preflightCompactionWarnMock).toHaveBeenCalledWith(
+        "preflight compaction failed",
+        expect.objectContaining({
+          stage: "preflight",
+          sessionKey: "main",
+          reasonClass,
+        }),
+      );
       expect(compactEmbeddedAgentSessionMock).toHaveBeenCalledTimes(1);
       const compactCall = requireCompactEmbeddedAgentSessionCall();
       expect(compactCall.contextTokenBudget).toBe(200_000);
@@ -1365,6 +1391,64 @@ describe("runMemoryFlushIfNeeded", () => {
       expect(refreshQueuedFollowupSessionMock).not.toHaveBeenCalled();
     },
   );
+
+  it("warns with the admitted compaction model and failover class when preflight compaction fails", async () => {
+    const reason = "Turn prefix summarization failed: 429 quota exceeded PROMPT_SENTINEL";
+    // A reload during preparation can admit a summary model the caller's config never named.
+    compactEmbeddedAgentSessionMock.mockImplementationOnce(async (_params, host) => {
+      host?.onCompactionTargetAdmitted?.({ provider: "anthropic", model: "claude-reloaded" });
+      return { ok: false, compacted: false, reason };
+    });
+    const sessionEntry: SessionEntry = createFlushSessionEntry({
+      totalTokens: 180_499,
+      compactionCount: 0,
+    });
+
+    await expect(
+      runDefaultPreflight(sessionEntry, {
+        cfg: compactionConfig({ memoryFlush: {}, model: "openai/gpt-5-nano" }),
+        modelContextTokens: 200_000,
+        sessionStore: { main: sessionEntry },
+        sessionKey: "main",
+        ...createCompactionLifecycle(createReplyOperation()),
+      }),
+    ).rejects.toThrow(`Preflight compaction required but failed: ${reason}`);
+
+    expect(preflightCompactionWarnMock).toHaveBeenCalledExactlyOnceWith(
+      "preflight compaction failed",
+      {
+        stage: "preflight",
+        sessionKey: "main",
+        provider: "anthropic",
+        model: "claude-reloaded",
+        reasonClass: "rate_limit",
+      },
+    );
+  });
+
+  it("omits the compaction model when preflight compaction fails before admitting one", async () => {
+    const reason = "Turn prefix summarization failed: 429 quota exceeded";
+    compactEmbeddedAgentSessionMock.mockResolvedValueOnce({ ok: false, compacted: false, reason });
+    const sessionEntry: SessionEntry = createFlushSessionEntry({
+      totalTokens: 180_499,
+      compactionCount: 0,
+    });
+
+    await expect(
+      runDefaultPreflight(sessionEntry, {
+        cfg: compactionConfig({ memoryFlush: {}, model: "openai/gpt-5-nano" }),
+        modelContextTokens: 200_000,
+        sessionStore: { main: sessionEntry },
+        sessionKey: "main",
+        ...createCompactionLifecycle(createReplyOperation()),
+      }),
+    ).rejects.toThrow(`Preflight compaction required but failed: ${reason}`);
+
+    expect(preflightCompactionWarnMock).toHaveBeenCalledExactlyOnceWith(
+      "preflight compaction failed",
+      { stage: "preflight", sessionKey: "main", reasonClass: "rate_limit" },
+    );
+  });
 
   it("estimates Codex tool-result mirrors through the provider projection after provider usage after runtime cutover", async () => {
     const providerPromptTokens = 20_000;

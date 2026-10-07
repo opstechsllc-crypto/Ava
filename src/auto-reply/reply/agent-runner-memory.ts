@@ -10,11 +10,16 @@ import { MemoryFlushToolsUnavailableError } from "../../agents/agent-tools.memor
 import { resolveBootstrapWarningSignaturesSeen } from "../../agents/bootstrap-budget.js";
 import { resolveCliBackendConfig } from "../../agents/cli-backends.js";
 import { estimateMessagesTokens } from "../../agents/compaction.js";
-import { isBenignCompactionSkipResult } from "../../agents/embedded-agent-runner/compact-reasons.js";
+import {
+  classifyCompactionReason,
+  isBenignCompactionSkipResult,
+} from "../../agents/embedded-agent-runner/compact-reasons.js";
 import type { AcceptedCompactionSuccessor } from "../../agents/embedded-agent-runner/compaction-successor.js";
 import { runEmbeddedAgentEntry } from "../../agents/embedded-agent-runner/run-entry.js";
+import type { CompactionAttemptTarget } from "../../agents/embedded-agent-runner/run/compaction-accounting-bridge.js";
 import { createDeferredEmbeddedRunLifecycleManager } from "../../agents/embedded-agent-runner/run/deferred-lifecycle-owner.js";
 import { createToolResultPromptProjectionState } from "../../agents/embedded-agent-runner/session-prompt-state.js";
+import { resolveFailoverReasonFromError } from "../../agents/failover-error.js";
 import { findModelInCatalog } from "../../agents/model-catalog-lookup.js";
 import { isCliRuntimeAliasForProvider } from "../../agents/model-runtime-aliases.js";
 import { isCliProvider } from "../../agents/model-selection.js";
@@ -676,6 +681,8 @@ export async function runSessionCompactionIfNeeded(params: {
   try {
     await notifyCompaction("start");
     assertActive();
+    // A reload during preparation can admit a summary model the caller's config never named.
+    let admittedCompactionTarget: CompactionAttemptTarget | undefined;
     const runtime = await embeddedAgentRuntimeLoader.load();
     const result = await runtime.compactEmbeddedAgentSession(
       {
@@ -783,6 +790,9 @@ export async function runSessionCompactionIfNeeded(params: {
           );
           hostAccountingCommitted = true;
         },
+        onCompactionTargetAdmitted: (target) => {
+          admittedCompactionTarget = target;
+        },
         onCommitted: (accepted) => {
           expectedSession = accepted.entry;
           entry = accepted.entry;
@@ -802,7 +812,15 @@ export async function runSessionCompactionIfNeeded(params: {
         return entry;
       }
       await notifyTerminalCompaction("incomplete");
-      logVerbose(`preflightCompaction failed: sessionKey=${params.sessionKey} reason=${reason}`);
+      preflightCompactionLog.warn("preflight compaction failed", {
+        stage: "preflight",
+        sessionKey: params.sessionKey,
+        ...admittedCompactionTarget,
+        reasonClass:
+          result?.failure?.reason ??
+          resolveFailoverReasonFromError(new Error(reason)) ??
+          classifyCompactionReason(reason),
+      });
       throw new Error(`Preflight compaction required but failed: ${reason}`);
     }
 
