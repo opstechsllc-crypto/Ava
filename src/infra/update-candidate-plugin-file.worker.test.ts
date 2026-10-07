@@ -1,3 +1,4 @@
+import { constants } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { readDirectoryIdentity } from "@openclaw/fs-safe/advanced";
@@ -9,6 +10,10 @@ import type {
   UpdateCandidatePluginFileReply,
   UpdateCandidatePluginFileRequest,
 } from "./update-candidate-plugin-file.js";
+import type {
+  UpdateCandidatePluginHashReply,
+  UpdateCandidatePluginHashRequest,
+} from "./update-candidate-plugin-hash.js";
 import {
   copyUpdateCandidatePluginTrees,
   prepareUpdateCandidatePluginTrees,
@@ -16,7 +21,10 @@ import {
 import { WorkerTaskPool } from "./worker-task-pool.js";
 
 const directories = useAutoCleanupTempDirTracker(afterEach);
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
+});
 
 async function fixture(count = 1) {
   const base = await fs.realpath(directories.make("update-file-workers-"));
@@ -64,13 +72,16 @@ it.each(["auto", "off"] as const)(
   "copies a large inventory through actual workers with native copying %s",
   async (nativeMode) => {
     vi.stubEnv("FS_SAFE_NATIVE_MODE", nativeMode);
-    const f = await fixture(1024);
+    const dispatch = vi.spyOn(WorkerTaskPool.prototype, "run");
+    const f = await fixture(1032);
+    expect(dispatch).toHaveBeenCalledTimes(9);
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ type: "snapshot-hash" }), {});
     await copyUpdateCandidatePluginTrees(f.plan, {
       targetStateDir: f.privateRoot,
       candidateRoot: f.candidateRoot,
     });
-    expect(await fs.readdir(f.destination)).toHaveLength(1024);
-    for (const index of [0, 511, 1023]) {
+    expect(await fs.readdir(f.destination)).toHaveLength(1032);
+    for (const index of [0, 511, 1031]) {
       const original = path.join(f.source, `${index}.txt`);
       const copied = path.join(f.destination, `${index}.txt`);
       expect(await fs.readFile(copied, "utf8")).toBe(`plugin payload ${index}`);
@@ -145,3 +156,52 @@ it("rejects source changes after the parent freezes the inventory", async () => 
     await worker.close();
   }
 });
+
+it.each(["file", "parent"] as const)(
+  "rejects a replaced source %s through the actual hash worker",
+  async (replacement) => {
+    const f = await fixture();
+    const entry = f.request.entry;
+    const request: UpdateCandidatePluginHashRequest = {
+      type: "snapshot-hash",
+      filePath: entry.path,
+      expected: {
+        dev: BigInt(entry.dev),
+        ino: BigInt(entry.ino),
+        size: BigInt(entry.size),
+        birthtimeNs: BigInt(entry.birthtimeNs),
+        mtimeNs: BigInt(entry.mtimeNs),
+        ctimeNs: BigInt(entry.ctimeNs),
+        mode: BigInt(entry.mode | constants.S_IFREG),
+        uid: BigInt(entry.uid),
+        gid: BigInt(entry.gid),
+      },
+    };
+    const worker = new WorkerTaskPool<
+      UpdateCandidatePluginHashRequest,
+      UpdateCandidatePluginHashReply
+    >({
+      workerUrl: resolveRuntimeProcessEntrypointUrl("updateCandidateState"),
+      maxWorkers: 1,
+      maxPendingTasks: 1,
+      restartOnError: false,
+    });
+    try {
+      expect(await worker.run(request, {})).toEqual({ type: "hashed", sha256: entry.sha256 });
+      const original = await fs.readFile(entry.path);
+      await fs.rename(replacement === "file" ? entry.path : f.source, path.join(f.base, "retired"));
+      if (replacement === "parent") {
+        await fs.mkdir(f.source);
+      }
+      await fs.writeFile(entry.path, original, { mode: entry.mode });
+      const reply = await worker.run(request, {});
+      expect(reply.type).toBe("failed");
+      if (reply.type === "failed") {
+        expect(reply.error.message).toContain("File changed while hashing snapshot");
+      }
+      expect(await fs.readdir(f.destination)).toEqual([]);
+    } finally {
+      await worker.close();
+    }
+  },
+);
