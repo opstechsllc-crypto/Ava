@@ -1,8 +1,5 @@
 import { CHANNEL_APPROVAL_NATIVE_RUNTIME_CONTEXT_CAPABILITY } from "openclaw/plugin-sdk/approval-handler-adapter-runtime";
-import {
-  readPositiveIntegerParam,
-  resolveReactionMessageId,
-} from "openclaw/plugin-sdk/channel-actions";
+import { readPositiveIntegerParam } from "openclaw/plugin-sdk/channel-actions";
 import type {
   ChannelMessageActionAdapter,
   ChannelMessageToolDiscovery,
@@ -56,6 +53,7 @@ import {
 import {
   extractMSTeamsToolSendResult,
   msteamsContextTargetsMatch,
+  resolveMSTeamsActionMessage,
   resolveMSTeamsAutoThreadId,
 } from "./action-threading.js";
 import {
@@ -177,28 +175,6 @@ function resolveGraphActionTarget(
     return currentGraphTarget;
   }
   return currentChatType === "channel" ? "" : (currentChannelTarget ?? "");
-}
-
-function resolveMSTeamsActionMessageId(
-  ctx: Parameters<NonNullable<ChannelMessageActionAdapter["handleAction"]>>[0],
-  to: string,
-  allowCurrentMessageIdFallback = false,
-): string {
-  const canUseCurrentMessageId =
-    allowCurrentMessageIdFallback &&
-    msteamsContextTargetsMatch(to, {
-      currentChannelId: ctx.toolContext?.currentChannelId ?? undefined,
-      currentMessagingTarget:
-        normalizeOptionalString(ctx.toolContext?.currentGraphChannelId) ??
-        normalizeOptionalString(ctx.toolContext?.currentMessagingTarget),
-    });
-  const messageId = canUseCurrentMessageId
-    ? resolveReactionMessageId({
-        args: ctx.params,
-        toolContext: { currentMessageId: ctx.toolContext?.currentMessageId ?? undefined },
-      })
-    : (normalizeOptionalString(ctx.params.messageId) ?? "");
-  return messageId == null ? "" : String(messageId).trim();
 }
 
 function describeMSTeamsMessageTool({
@@ -568,7 +544,11 @@ export const msteamsPlugin: ChannelPlugin<ResolvedMSTeamsAccount, ProbeMSTeamsRe
 
           if (ctx.action === "read" || ctx.action === "pin" || ctx.action === "reactions") {
             const action = ctx.action;
-            const messageId = resolveMSTeamsActionMessageId(ctx, graphTo, action === "reactions");
+            const { messageId, threadRootId } = resolveMSTeamsActionMessage(
+              ctx,
+              graphTo,
+              action === "reactions",
+            );
             if (!graphTo || !messageId) {
               return actionError(
                 `${{ read: "Read", pin: "Pin", reactions: "Reactions" }[action]} requires a target (to) and messageId.`,
@@ -576,7 +556,7 @@ export const msteamsPlugin: ChannelPlugin<ResolvedMSTeamsAccount, ProbeMSTeamsRe
             }
             const to = await authorizeActionTarget(graphTo);
             const runtime = await loadMSTeamsChannelRuntime();
-            const params = { cfg: ctx.cfg, to, messageId };
+            const params = { cfg: ctx.cfg, to, messageId, threadRootId };
             if (action === "read") {
               const message = await runtime.getMessageMSTeams(params);
               return jsonMSTeamsOkActionResult(action, { message });
@@ -616,7 +596,7 @@ export const msteamsPlugin: ChannelPlugin<ResolvedMSTeamsAccount, ProbeMSTeamsRe
           }
 
           if (ctx.action === "react") {
-            const messageId = resolveMSTeamsActionMessageId(ctx, graphTo, true);
+            const { messageId, threadRootId } = resolveMSTeamsActionMessage(ctx, graphTo, true);
             if (!graphTo || !messageId) {
               return actionError("React requires a target (to) and messageId.");
             }
@@ -641,6 +621,7 @@ export const msteamsPlugin: ChannelPlugin<ResolvedMSTeamsAccount, ProbeMSTeamsRe
               cfg: ctx.cfg,
               to,
               messageId,
+              threadRootId,
               reactionType: emoji,
             });
             return jsonMSTeamsActionResult("react", {

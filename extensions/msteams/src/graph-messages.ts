@@ -94,13 +94,24 @@ type MSTeamsMessageTarget = {
   cfg: OpenClawConfig;
   to: string;
   messageId: string;
+  /** Thread root of a channel reply; Graph addresses replies only beneath it. */
+  threadRootId?: string;
 };
+
+function resolveMessagePath(
+  conv: ReturnType<typeof resolveConversationPath>,
+  params: Pick<MSTeamsMessageTarget, "messageId" | "threadRootId">,
+): string {
+  const messageId = encodeURIComponent(params.messageId);
+  return conv.kind === "channel" && params.threadRootId && params.threadRootId !== params.messageId
+    ? `${conv.basePath}/messages/${encodeURIComponent(params.threadRootId)}/replies/${messageId}`
+    : `${conv.basePath}/messages/${messageId}`;
+}
 
 export async function getMessageMSTeams(params: MSTeamsMessageTarget) {
   const token = await resolveGraphToken(params.cfg);
   const conversationId = await resolveGraphConversationId(params.to);
-  const { basePath } = resolveConversationPath(conversationId);
-  const path = `${basePath}/messages/${encodeURIComponent(params.messageId)}`;
+  const path = resolveMessagePath(resolveConversationPath(conversationId), params);
   const msg = await fetchGraphJson<GraphMessage>({ token, path });
   return {
     id: msg.id ?? params.messageId,
@@ -242,10 +253,9 @@ async function mutateMessageReaction(
   const reactionType = resolveMSTeamsReactionEmoji(params.reactionType);
   const token = await resolveGraphToken(params.cfg, { preferDelegated: true });
   const conversationId = await resolveGraphConversationId(params.to);
-  const { basePath } = resolveConversationPath(conversationId);
   await mutateGraphJson<unknown>({
     token,
-    path: `${basePath}/messages/${encodeURIComponent(params.messageId)}/${operation}`,
+    path: `${resolveMessagePath(resolveConversationPath(conversationId), params)}/${operation}`,
     method: "POST",
     body: { reactionType },
     beta: true,
@@ -268,8 +278,7 @@ export function unreactMessageMSTeams(params: ReactMessageMSTeamsParams): Promis
 export async function listReactionsMSTeams(params: MSTeamsMessageTarget) {
   const token = await resolveGraphToken(params.cfg);
   const conversationId = await resolveGraphConversationId(params.to);
-  const { basePath } = resolveConversationPath(conversationId);
-  const path = `${basePath}/messages/${encodeURIComponent(params.messageId)}`;
+  const path = resolveMessagePath(resolveConversationPath(conversationId), params);
   const msg = await fetchGraphJson<GraphMessageWithReactions>({ token, path });
 
   const grouped = new Map<
