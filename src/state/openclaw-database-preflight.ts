@@ -65,10 +65,7 @@ import {
 import { getActiveOpenClawStateDatabaseReadSnapshot } from "./openclaw-state-db-readonly.js";
 import { normalizeOpenClawStateSchemaReadError } from "./openclaw-state-db-schema-migration-required.js";
 import { assertCanonicalStateSchemaShape } from "./openclaw-state-db-schema-repair.js";
-import {
-  readStateSchemaContentVersion,
-  readStateSchemaMigrationVersion,
-} from "./openclaw-state-db-schema-version.js";
+import { readStateSchemaContentVersion } from "./openclaw-state-db-schema-version.js";
 import { resolveOpenClawStateSqlitePath } from "./openclaw-state-db.paths.js";
 import {
   inspectOpenClawStateOwnershipFromDatabase,
@@ -255,7 +252,7 @@ export async function preflightOpenClawStateDatabasePath(
       return result("incompatible");
     }
     ownership = inspectOpenClawStateOwnershipFromDatabase(database, resolvedPath);
-    if (readStateSchemaMigrationVersion(database) < OPENCLAW_STATE_SCHEMA_VERSION) {
+    if (readStateSchemaContentVersion(database) < OPENCLAW_STATE_SCHEMA_VERSION) {
       return result("migration-required", { requiresWrite: true });
     }
     if (foundVersion < contentVersion) {
@@ -365,7 +362,7 @@ export async function preflightOpenClawDatabaseSchemas(
       const migrationVersion =
         contentVersion > supportedVersions.state
           ? contentVersion
-          : readStateSchemaMigrationVersion(stateDatabase);
+          : readStateSchemaContentVersion(stateDatabase);
       if (migrationVersion < supportedVersions.state) {
         (result.pendingMigrations ??= []).push({
           kind: "state",
