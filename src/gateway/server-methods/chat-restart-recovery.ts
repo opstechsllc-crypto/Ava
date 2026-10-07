@@ -10,7 +10,11 @@ import {
   type SessionEntry,
   type InternalSessionEntry,
 } from "../../config/sessions.js";
-import { resolveSessionEntryResetFreshness } from "../../config/sessions/entry-freshness.js";
+import {
+  resolveSessionEntryResetFreshness,
+  resolveSessionEntryResetFreshnessFromSnapshot,
+} from "../../config/sessions/entry-freshness.js";
+import type { SessionLifecycleTimestamps } from "../../config/sessions/lifecycle.types.js";
 import {
   hasRestartRecoveryTerminalRun,
   isRetryableUnadoptedChatClaim,
@@ -28,7 +32,11 @@ import { resolveProjectedAgentRunProgressState } from "../../infra/agent-run-reg
 import { loadOrCreateProcessDeviceIdentityAsync } from "../../infra/device-identity-async.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { findRestartRecoveryUnsafeChatAdmissionHook } from "../../plugins/restart-recovery-hook-safety.js";
-import { isCronSessionKey, isSubagentSessionKey } from "../../routing/session-key.js";
+import {
+  isCronSessionKey,
+  isIncognitoSessionKey,
+  isSubagentSessionKey,
+} from "../../routing/session-key.js";
 import { isAgentHarnessSessionKey } from "../../sessions/agent-harness-session-key.js";
 import { isAcpSessionKey, resolveSessionDispatchKind } from "../../sessions/session-key-utils.js";
 import { recordGatewaySessionRunFailure } from "../../sessions/session-run-error.js";
@@ -309,6 +317,7 @@ export function resolveRestartSafeChatAdmission(params: {
   entry?: SessionEntry;
   acpMeta: SessionEntry["acp"] | null;
   initialSessionEntry?: SessionEntry;
+  lifecycleTimestamps: SessionLifecycleTimestamps | undefined;
   now: number;
   placement: WorkerSessionPlacementRecord | undefined;
   request?: RestartSafeChatRequest;
@@ -330,18 +339,22 @@ export function resolveRestartSafeChatAdmission(params: {
     !entry ||
     !isRestartSafeChatSession({ ...params, entry }) ||
     (!params.initialSessionEntry &&
-      resolveSessionEntryResetFreshness({
-        agentId: params.agentId,
-        now: params.now,
-        resetOverride: resolveChannelResetConfig({
+      resolveRestartSafeChatFreshness(
+        {
+          agentId: params.agentId,
+          now: params.now,
+          resetOverride: resolveChannelResetConfig({
+            sessionCfg: params.cfg.session,
+            channel: sessionDeliveryChannel(params.entry),
+          }),
+          resetType: resolveSessionResetType({ sessionKey: params.sessionKey }),
           sessionCfg: params.cfg.session,
-          channel: sessionDeliveryChannel(params.entry),
-        }),
-        resetType: resolveSessionResetType({ sessionKey: params.sessionKey }),
-        sessionCfg: params.cfg.session,
-        sessionKey: params.sessionKey,
-        storePath: params.storePath,
-      }).state !== "fresh") ||
+          sessionKey: params.sessionKey,
+          storePath: params.storePath,
+        },
+        entry,
+        params.lifecycleTimestamps,
+      ).state !== "fresh") ||
     hasRestartUnsafeChatWork(params)
   ) {
     return undefined;
@@ -360,6 +373,21 @@ export function resolveRestartSafeChatAdmission(params: {
         ? { priorTerminalSourceRunId: entry.restartRecoveryDeliverySourceRunId }
         : {}),
   };
+}
+
+function resolveRestartSafeChatFreshness(
+  params: Parameters<typeof resolveSessionEntryResetFreshness>[0],
+  entry: SessionEntry,
+  lifecycleTimestamps: SessionLifecycleTimestamps | undefined,
+) {
+  if (lifecycleTimestamps) {
+    return resolveSessionEntryResetFreshnessFromSnapshot(params, entry, lifecycleTimestamps);
+  }
+  // Process-held incognito state keeps its native freshness owner.
+  if (isIncognitoSessionKey(params.sessionKey)) {
+    return resolveSessionEntryResetFreshness(params);
+  }
+  throw new Error("Session lifecycle timestamps were not prepared for chat admission; retry.");
 }
 
 export function buildRestartSafeChatTranscriptState(params: {

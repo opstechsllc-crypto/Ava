@@ -65,6 +65,26 @@ while bundled callers use its async replacement. These paths reuse admitted sche
 facts and preserve foreign-commit visibility. Schemas, stored timestamps, reset
 policy, and update behavior are unchanged.
 
+Gateway restart readiness inspects shared-state schema, registry, and retained
+agent-deletion facts in the existing schema inspection worker. Boot and Doctor
+retain their native admission callbacks. The preflight owner keeps the captured
+snapshot until inspection and child cleanup settle; snapshot staging locks retain
+their native owner. Canonical comparison contracts return through the existing
+schema-contract cache; version facts stay within their unchanged snapshot. Each
+request rereads stored facts. Schemas, stored bytes, and update behavior are unchanged.
+
+Shared-state readers reuse the content-version marker at their admitted connection
+revision. Existing foreign-commit probes, local mutations, rollback, and schema
+changes invalidate that fact. Transactions, pinned snapshots, unadmitted reads,
+and authorizer-controlled reads still query SQLite. Each caller applies its own
+published-version floor without retaining that floor in the marker cache.
+
+Trajectory retention readers receive already cached canonical validation
+definitions under the exact source-schema key. Cold hosts do not build a
+comparison database to prepare that handoff. Each reader still validates the
+actual schema, database identity, quarantine state, and read freshness; retention
+selection and retry policy are unchanged.
+
 Reusable SQLite inspection children launch in the detached lifecycle context,
 after the caller captures the runtime generation, transport, environment, and
 working directory. Their process callbacks and idle queue tail must not retain

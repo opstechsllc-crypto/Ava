@@ -202,21 +202,33 @@ it.each([
   });
 });
 
-it("uses fresh worker-prepared admission settings without host metadata reads", async () => {
+it("uses fresh worker-prepared admission settings and reset timestamps without host payload reads", async () => {
   await withOpenClawTestState({ label: "chat-admission-read-count" }, async () => {
     const cfg = {
       agents: { ownership: "explicit", entries: { main: {} } },
+      session: { reset: { mode: "daily" } },
     } satisfies OpenClawConfig;
     setRuntimeConfigSnapshot(cfg, cfg);
     const sessionKey = "agent:main:dashboard:admission-reads";
     const runId = "chat-admission-read-count";
     const scope = { agentId: "main", sessionKey };
+    const now = Date.now();
     const entry: SessionEntry = {
       sessionId: "admission-session",
-      updatedAt: 1,
+      updatedAt: now,
       skillsSnapshot: { prompt: "saved prompt".repeat(4096), skills: [] },
     };
     replaceSessionEntrySync(scope, entry);
+    await sessionAccessor.appendTranscriptEvent(
+      { ...scope, sessionId: entry.sessionId },
+      {
+        type: "session",
+        version: 3,
+        id: entry.sessionId,
+        timestamp: new Date(now - 2 * 24 * 60 * 60 * 1000).toISOString(),
+        cwd: "/synthetic-chat-admission",
+      },
+    );
     const request = await normalizeChatSendRequest({
       client: null,
       params: { sessionKey, message: "Hello", idempotencyKey: runId },
@@ -229,6 +241,7 @@ it("uses fresh worker-prepared admission settings without host metadata reads", 
       request: request.value,
       client: null,
       context,
+      isDirectExternalUser: true,
     });
     if (!prepared.ok) {
       throw new Error("Session preparation failed");
@@ -237,7 +250,7 @@ it("uses fresh worker-prepared admission settings without host metadata reads", 
     let admitted: Awaited<ReturnType<typeof admitChatSend>> | undefined;
     try {
       // Admission must read current settings even though preparation retained the old entry.
-      replaceSessionEntrySync(scope, { ...entry, permissionMode: "full", updatedAt: 2 });
+      replaceSessionEntrySync(scope, { ...entry, permissionMode: "full", updatedAt: now + 1 });
       expect(session.entry?.permissionMode).toBeUndefined();
       const sql = observeSqliteReadSql(StatementSync.prototype);
       const respond = vi.fn();
@@ -256,11 +269,15 @@ it("uses fresh worker-prepared admission settings without host metadata reads", 
         }
         expect(admitted.value.admittedSessionSettings?.permissionMode).toBe("full");
         expect(admitted.value.admittedSessionId).toBe(entry.sessionId);
+        // Recent activity cannot make a transcript from before the daily reset restart-safe.
+        expect(admitted.value.restartSafeAdmission).toBeUndefined();
         // Physical-source/absent-key guards may query keys without decoding entry metadata.
         const metadataReads = sql.queries.filter(
           (query) => /\bsession_nodes\b/u.test(query) && /\bentry_json\b/u.test(query),
         );
         expect(metadataReads, metadataReads.join("\n")).toHaveLength(0);
+        const transcriptReads = sql.queries.filter((query) => /\btranscript_events\b/u.test(query));
+        expect(transcriptReads, transcriptReads.join("\n")).toHaveLength(0);
       } finally {
         sql.restore();
       }

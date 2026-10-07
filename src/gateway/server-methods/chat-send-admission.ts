@@ -342,6 +342,7 @@ export async function admitChatSend(
         clientRunId,
         context,
         entry: latestEntry,
+        lifecycleTimestamps: latestSession.lifecycleTimestamps,
         initialSessionEntry,
         acpMeta,
         now: Date.now(),
