@@ -1,5 +1,11 @@
 // These consumers need the host-owned SQLite broker, which runs in forked processes.
 export const databaseWorkerCoreTestFiles = [
+  "src/hooks/bundled/session-memory/capture.test.ts",
+  "src/hooks/bundled/session-memory/handler.test.ts",
+  "src/hooks/bundled/session-memory/handler-auto-reset.test.ts",
+  "src/hooks/bundled/session-memory/handler-admission.test.ts",
+  "src/auto-reply/reply/session-hooks-context.test.ts",
+  "src/gateway/control-ui-public-session-read.test.ts",
   "src/gateway/agent-turn/agent-request-routing.session-id.test.ts",
   "src/gateway/conversation-route-ownership.worker.test.ts",
   "src/gateway/conversation-list.admission.test.ts",
@@ -60,6 +66,7 @@ export const databaseWorkerCoreTestFiles = [
   "src/agents/embedded-agent-runner/run.terminal-timeout-delivery.integration.test.ts",
   "src/agents/embedded-agent-runner/run/attempt-execution-phase.test.ts",
   "src/agents/embedded-agent-runner/run/attempt-native-provider-authority.test.ts",
+  "src/agents/embedded-agent-runner/run/attempt-native-video-transcript.test.ts",
   "src/agents/embedded-agent-runner/run/lane-controller.lifecycle.test.ts",
   "src/agents/embedded-agent-runner/run/lane-controller.writer-claim.test.ts",
   "src/agents/embedded-agent-runner/run/run-settlement.test.ts",
@@ -1098,6 +1105,7 @@ export const databaseWorkerCoreTestFiles = [
   "src/plugin-sdk/session-store-runtime.conversation.test.ts",
   "src/plugin-sdk/session-store-runtime.maintenance.test.ts",
   "src/plugin-sdk/session-transcript-runtime-visible-delta.test.ts",
+  "src/plugin-sdk/session-transcript-runtime.configured-store.test.ts",
 ];
 
 const databaseWorkerCoreTestFileSet = new Set(databaseWorkerCoreTestFiles);
