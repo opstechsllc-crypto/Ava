@@ -284,6 +284,7 @@ export async function handleEmbeddedAssistantFailure(input: {
       fallbackConfigured: input.fallbackConfigured,
       failoverFailure,
       failoverReason: assistantFailoverReason,
+      errorMessage: failedAssistant?.errorMessage,
       harnessOwnsTransport: input.pluginHarnessOwnsTransport,
       profileRotated,
     });
