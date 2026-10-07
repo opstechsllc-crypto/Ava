@@ -181,6 +181,61 @@ export type OpenAICompletionsContentDelta =
   | { kind: "thinking"; signature?: string; text: string }
   | { kind: "text"; text: string; source?: OpenAICompletionsTextSource };
 
+function hasObservableContent(value: unknown): boolean {
+  if (typeof value === "string") {
+    return value.length > 0;
+  }
+  if (Array.isArray(value)) {
+    return value.some(hasObservableContent);
+  }
+  if (isRecord(value)) {
+    return Object.entries(value).some(
+      ([field, nestedValue]) =>
+        field !== "type" &&
+        field !== "id" &&
+        field !== "index" &&
+        hasObservableContent(nestedValue),
+    );
+  }
+  return false;
+}
+
+export function hasOpenAICompletionsDeltaContent(delta: ChatCompletionChunk.Choice.Delta): boolean {
+  return Object.entries(delta).some(
+    ([field, value]) => field !== "role" && hasObservableContent(value),
+  );
+}
+
+export function hasOpenAICompletionsModelProgress(chunk: {
+  choices?: Array<{ delta?: unknown; message?: unknown }>;
+}): boolean {
+  return (
+    chunk.choices?.some((choice) => {
+      const delta = choice.delta ?? choice.message;
+      if (!isRecord(delta)) {
+        return false;
+      }
+      return hasOpenAICompletionsDeltaContent(delta as ChatCompletionChunk.Choice.Delta);
+    }) ?? false
+  );
+}
+
+export function trackOpenAICompletionsReasoningUsage(
+  rawUsage: NonNullable<ChatCompletionChunk["usage"]> | null | undefined,
+  previousReasoningTokens: number | undefined,
+): { hasProgress: boolean; maxTokens: number } {
+  const reasoningTokens = rawUsage?.completion_tokens_details?.reasoning_tokens;
+  const validReasoningTokens =
+    typeof reasoningTokens === "number" && Number.isFinite(reasoningTokens)
+      ? reasoningTokens
+      : undefined;
+  return {
+    hasProgress:
+      validReasoningTokens !== undefined && validReasoningTokens > (previousReasoningTokens ?? 0),
+    maxTokens: Math.max(previousReasoningTokens ?? 0, validReasoningTokens ?? 0),
+  };
+}
+
 type OpenAICompletionsReasoningBatch = {
   readonly deltas: readonly OpenAICompletionsContentDelta[];
   readonly mirroredThinking: readonly string[];
