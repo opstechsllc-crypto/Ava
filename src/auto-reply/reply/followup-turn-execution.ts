@@ -95,6 +95,7 @@ export async function executeFollowupTurn(params: {
       ctx: {
         InboundEventKind: turn.queued.currentInboundEventKind,
         InputProvenance: turn.queued.run.inputProvenance,
+        SenderIsBot: turn.queued.run.senderIsBot,
       },
       cfg: turn.config,
     });

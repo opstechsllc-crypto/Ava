@@ -171,6 +171,7 @@ Silence policy resolves by conversation type:
 
 - Direct conversations never receive `NO_REPLY` prompt guidance. An undelivered required answer still needs recovery; the token cannot waive that obligation.
 - Accepted group/channel requests require a reply by default, including unmentioned messages admitted with `requireMention: false`. Mention and access gates still decide which messages reach the agent. To allow unaddressed requests to finish silently, explicitly set `silentReply.group: "allow"` at one of the configuration scopes below; mentions and authorized commands still require a response.
+- Turns opened by a bot sender (the channel marks the sender as a bot) can remain silent in every conversation type, including mentions; authorized commands still require a response. In `message_tool` visible-reply mode the turn's delivery hint says a reply is optional, and a private final is not re-prompted for delivery. Requiring an answer to another agent turns each answer into a new request, so two agents acknowledge each other without end.
 - [Ambient room events](/channels/ambient-room-events) can remain silent. In `message_tool` visible-reply mode, an optional turn stays silent by not calling `message(action=send)`. Private subagent completions record the parent's reviewed outcome internally; they do not need a silent token to keep that result private.
 
 Defaults live under `agents.defaults.silentReply.group`; `surfaces.<id>.silentReply.group` can override group policy per surface. Doctor removes the retired `internal` setting during config migration.

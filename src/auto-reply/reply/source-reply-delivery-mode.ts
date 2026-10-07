@@ -29,6 +29,7 @@ export type SourceReplyDeliveryModeContext = Pick<
   | "BotUsername"
   | "WasMentioned"
   | "InputProvenance"
+  | "SenderIsBot"
 >;
 
 export function isUnauthorizedTextSlashCommand(ctx: SourceReplyDeliveryModeContext): boolean {
@@ -112,6 +113,11 @@ export function resolveSourceReplyExpectation(params: {
     return "required";
   }
   if (params.ctx.InboundEventKind === "room_event") {
+    return "optional";
+  }
+  // Another agent never needs an answer; requiring one turns every reply into
+  // a new request and two agents acknowledge each other without end.
+  if (params.ctx.SenderIsBot === true) {
     return "optional";
   }
   const chatType = normalizeChatType(params.ctx.ChatType);

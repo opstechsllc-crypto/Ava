@@ -4,7 +4,10 @@ import { appendCurrentInboundContext } from "../../agents/embedded-agent-runner/
 import type { RuntimeContextFragment } from "../../agents/internal-runtime-context.js";
 import type { InboundEventKind } from "../../channels/inbound-event/kind.js";
 import { normalizeMediaFacts, type MediaFact } from "../../media/media-facts.js";
-import { MESSAGE_TOOL_ONLY_DELIVERY_HINT } from "../../plugin-sdk/message-tool-delivery-hints.js";
+import {
+  BOT_SENDER_DELIVERY_HINT,
+  MESSAGE_TOOL_ONLY_DELIVERY_HINT,
+} from "../../plugin-sdk/message-tool-delivery-hints.js";
 import { annotateInterSessionPromptText } from "../../sessions/input-provenance.js";
 import { MEDIA_ONLY_USER_TEXT } from "../../sessions/user-turn-media.js";
 import type { SourceReplyDeliveryMode } from "../get-reply-options.types.js";
@@ -99,6 +102,7 @@ function resolveRoomEventTranscriptBody(params: ReplyPromptEnvelopeBaseParams): 
 }
 
 function resolvePerTurnDeliveryDirective(params: {
+  sessionCtx: TemplateContext;
   inboundEventKind?: InboundEventKind;
   sourceReplyDeliveryMode?: SourceReplyDeliveryMode;
 }): string | undefined {
@@ -111,7 +115,9 @@ function resolvePerTurnDeliveryDirective(params: {
     params.inboundEventKind === "user_request" &&
     params.sourceReplyDeliveryMode === "message_tool_only"
   ) {
-    return MESSAGE_TOOL_ONLY_DELIVERY_HINT;
+    return params.sessionCtx.SenderIsBot === true
+      ? BOT_SENDER_DELIVERY_HINT
+      : MESSAGE_TOOL_ONLY_DELIVERY_HINT;
   }
   return undefined;
 }

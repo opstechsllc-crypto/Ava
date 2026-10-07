@@ -175,6 +175,28 @@ describe("resolveStrandedReplyRecovery", () => {
   });
 
   it.each([
+    { senderIsBot: true, expected: "none" },
+    { senderIsBot: false, expected: "retry" },
+    { senderIsBot: undefined, expected: "retry" },
+  ])(
+    "recovers only when a non-bot sender opened the run: $senderIsBot",
+    ({ senderIsBot, expected }) => {
+      const recovery = resolveStrandedReplyRecovery({
+        base: createMockFollowupRun({ prompt: "question", run: { senderIsBot } }),
+        payloads: [],
+        finalText: substantiveFinal,
+        sourceReplyDeliveryMode: "message_tool_only",
+        sendPolicyDenied: false,
+        successfulSourceReplyDelivery: false,
+        isHeartbeat: false,
+        isRoomEvent: false,
+      });
+
+      expect(recovery.kind).toBe(expected);
+    },
+  );
+
+  it.each([
     { label: "room events", isRoomEvent: true },
     { label: "heartbeats", isHeartbeat: true },
     { label: "send-policy denial", sendPolicyDenied: true },
