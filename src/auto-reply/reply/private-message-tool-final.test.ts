@@ -9,6 +9,7 @@ const base = {
   successfulSourceReplyDelivery: false,
   isHeartbeat: false,
   isRoomEvent: false,
+  isBotSender: false,
   finalText:
     "Here is the answer the user asked for. It includes enough detail to look like a visible response rather than an internal no-op note.",
 };
@@ -117,8 +118,12 @@ describe("shouldWarnAboutPrivateMessageToolFinal", () => {
     expect(shouldWarnAboutPrivateMessageToolFinal({ ...base, sendPolicyDenied: true })).toBe(false);
   });
 
-  it("does not flag heartbeat or room-event non-delivery", () => {
+  it("does not flag heartbeat, room-event, or bot-sender non-delivery", () => {
     expect(shouldWarnAboutPrivateMessageToolFinal({ ...base, isHeartbeat: true })).toBe(false);
     expect(shouldWarnAboutPrivateMessageToolFinal({ ...base, isRoomEvent: true })).toBe(false);
+    expect(shouldWarnAboutPrivateMessageToolFinal({ ...base, isBotSender: true })).toBe(false);
+    expect(
+      classifyPrivateMessageToolFinal({ ...base, isBotSender: true, finalText: "Got it." }),
+    ).toBe("none");
   });
 });

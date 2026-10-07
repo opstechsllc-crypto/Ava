@@ -41,9 +41,10 @@ export function resolveStrandedReplyRecovery(params: {
   isHeartbeat: boolean;
   isRoomEvent: boolean;
 }): StrandedReplyRecovery {
+  const context = { ...params, isBotSender: params.base.run.senderIsBot === true };
   // Host-owned payloads can still be awaiting transport when completion bookkeeping runs.
   if (
-    !shouldClassifyPrivateMessageToolFinal(params) ||
+    !shouldClassifyPrivateMessageToolFinal(context) ||
     params.payloads.some(
       (payload) =>
         isReplyPayloadTerminalContent(payload) &&
@@ -52,7 +53,7 @@ export function resolveStrandedReplyRecovery(params: {
   ) {
     return { kind: "none" };
   }
-  const classification = classifyPrivateMessageToolFinal(params);
+  const classification = classifyPrivateMessageToolFinal(context);
   if (params.base.strandedReplyRetry === true) {
     return {
       kind: "diagnostic",

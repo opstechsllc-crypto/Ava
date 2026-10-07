@@ -242,6 +242,8 @@ export type FollowupRun = {
     senderUsername?: string;
     senderE164?: string;
     senderIsOwner?: boolean;
+    /** The sender is another agent; its turns treat a visible reply as optional. */
+    senderIsBot?: boolean;
     traceAuthorized?: boolean;
     /** Inline choice stays on this run; omission follows the live session preference. */
     traceLevelOverride?: TraceLevel;

@@ -18,6 +18,8 @@ type PrivateMessageToolFinalContext = {
   successfulSourceReplyDelivery: boolean;
   isHeartbeat: boolean;
   isRoomEvent: boolean;
+  /** Another agent opened the turn, so withholding a reply is a valid outcome. */
+  isBotSender: boolean;
 };
 
 /** Returns whether a private final can represent an expected source reply that was not delivered. */
@@ -27,6 +29,7 @@ export function shouldClassifyPrivateMessageToolFinal(
   return !(
     params.isHeartbeat ||
     params.isRoomEvent ||
+    params.isBotSender ||
     params.sourceReplyDeliveryMode !== "message_tool_only" ||
     params.sendPolicyDenied ||
     params.successfulSourceReplyDelivery

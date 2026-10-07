@@ -1,6 +1,9 @@
 // Tests prompt prelude construction for sender, routing, and context metadata.
 import { describe, expect, it } from "vitest";
-import { MESSAGE_TOOL_ONLY_DELIVERY_HINT } from "../../plugin-sdk/message-tool-delivery-hints.js";
+import {
+  BOT_SENDER_DELIVERY_HINT,
+  MESSAGE_TOOL_ONLY_DELIVERY_HINT,
+} from "../../plugin-sdk/message-tool-delivery-hints.js";
 import { finalizeInboundContext } from "./inbound-context.js";
 import { buildInboundUserContextPrefix } from "./inbound-meta.js";
 import { buildReplyPromptEnvelope } from "./prompt-prelude.js";
@@ -94,6 +97,44 @@ describe("buildReplyPromptEnvelope", () => {
     expect(envelope.transcriptCommandBody).toBe("what changed?");
     expect(envelope.transcriptCommandBody).not.toContain(MESSAGE_TOOL_ONLY_DELIVERY_HINT);
   });
+
+  it.each([
+    { SenderIsBot: true, hint: BOT_SENDER_DELIVERY_HINT, other: MESSAGE_TOOL_ONLY_DELIVERY_HINT },
+    { SenderIsBot: false, hint: MESSAGE_TOOL_ONLY_DELIVERY_HINT, other: BOT_SENDER_DELIVERY_HINT },
+    {
+      SenderIsBot: undefined,
+      hint: MESSAGE_TOOL_ONLY_DELIVERY_HINT,
+      other: BOT_SENDER_DELIVERY_HINT,
+    },
+  ])(
+    "makes the visible reply optional only for bot senders: $SenderIsBot",
+    ({ SenderIsBot, hint, other }) => {
+      const sessionCtx = finalizeInboundContext({
+        Body: "@bot what changed?",
+        BodyStripped: "what changed?",
+        Provider: "telegram",
+        ChatType: "group",
+        InboundEventKind: "user_request",
+        SenderIsBot,
+      });
+
+      const envelope = buildReplyPromptEnvelope({
+        ctx: sessionCtx,
+        sessionCtx,
+        baseBody: "what changed?",
+        prefixedBody: "what changed?",
+        hasUserBody: true,
+        inboundUserContext: "Current message:\nchat_id=-100123",
+        isBareSessionReset: false,
+        startupAction: "new",
+        inboundEventKind: "user_request",
+        sourceReplyDeliveryMode: "message_tool_only",
+      });
+
+      expect(countOccurrences(envelope.currentInboundContext?.text, hint)).toBe(1);
+      expect(envelope.currentInboundContext?.text).not.toContain(other);
+    },
+  );
 
   it.each([undefined, "automatic"] as const)(
     "omits user-request delivery hints for %s delivery",

@@ -4,6 +4,7 @@ import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { CommandTurnContext } from "../command-turn-context.js";
 import {
   resolveSourceReplyDeliveryMode,
+  resolveSourceReplyExpectation,
   resolveSourceReplyVisibilityPolicy,
 } from "./source-reply-delivery-mode.js";
 
@@ -569,5 +570,43 @@ describe("resolveSourceReplyVisibilityPolicy", () => {
         deliverySuppressionReason: "sourceReplyDeliveryMode: message_tool_only",
       },
     );
+  });
+});
+
+describe("resolveSourceReplyExpectation", () => {
+  it.each([
+    {
+      label: "bot direct message",
+      ctx: { ChatType: "direct", SenderIsBot: true },
+      expected: "optional",
+    },
+    {
+      label: "bot group mention",
+      ctx: { ChatType: "group", WasMentioned: true, SenderIsBot: true },
+      expected: "optional",
+    },
+    {
+      label: "bot authorized command",
+      ctx: {
+        ChatType: "direct",
+        SenderIsBot: true,
+        CommandAuthorized: true,
+        CommandBody: "/status",
+      },
+      expected: "required",
+    },
+    {
+      label: "human direct message",
+      ctx: { ChatType: "direct", SenderIsBot: false },
+      expected: "required",
+    },
+    { label: "unknown direct sender", ctx: { ChatType: "direct" }, expected: "required" },
+    {
+      label: "human group mention",
+      ctx: { ChatType: "group", WasMentioned: true, SenderIsBot: false },
+      expected: "required",
+    },
+  ] as const)("expects a $expected reply for a $label", ({ ctx, expected }) => {
+    expect(resolveSourceReplyExpectation({ cfg: emptyConfig, ctx })).toBe(expected);
   });
 });
