@@ -1,7 +1,8 @@
+import type { AdmittedRunOperatorAuthority } from "../../agents/admitted-run-context.js";
 import type { CronCreatorAuthorityCapability } from "../../agents/cron-creator-authority-context.js";
 import {
   consumeRequesterCronAuthorityAdmission,
-  revokeRequesterCronAuthority,
+  admitRequesterCronAuthorityUserTurn,
 } from "../../agents/subagents/requester-cron-authority.js";
 import type { InputProvenance } from "../../sessions/input-provenance.js";
 import { hasGatewayAdminScope } from "../operator-scopes.js";
@@ -26,6 +27,7 @@ type DirectOperatorAuthorityParams = {
   resolvedSessionKey?: string;
   spawnedBy?: string;
   client?: GatewayClient | null;
+  operatorAuthority?: AdmittedRunOperatorAuthority;
   isCurrent?: () => boolean;
   inputProvenance?: InputProvenance;
   disallowed: boolean;
@@ -67,8 +69,10 @@ function resolveDirectOperatorAuthority(
   const runId = params.runId.trim();
   const isDirectTurn = isDirectGatewayUserTurn(params);
   if (isDirectTurn && params.resolvedSessionKey) {
-    // A new user admission replaces pending task authority, including for a non-admin caller.
-    revokeRequesterCronAuthority(params.resolvedSessionKey);
+    admitRequesterCronAuthorityUserTurn({
+      sessionKey: params.resolvedSessionKey,
+      operatorAuthority: params.operatorAuthority,
+    });
   }
   const isDirectOperator =
     isDirectTurn &&
@@ -98,6 +102,7 @@ export function resolveGatewayCronCreatorAuthorityAdmission(params: {
   sessionId?: string;
   spawnedBy?: string;
   client?: GatewayClient | null;
+  operatorAuthority?: AdmittedRunOperatorAuthority;
   isCurrent?: () => boolean;
   request: AgentRunRequest;
   inputProvenance?: InputProvenance;
@@ -147,6 +152,7 @@ type GatewayChatUserTurn = {
   resolvedSessionKey?: string;
   spawnedBy?: string;
   client?: GatewayClient | null;
+  operatorAuthority?: AdmittedRunOperatorAuthority;
   isCurrent?: () => boolean;
   inputProvenance?: InputProvenance;
   hasExplicitOrigin: boolean;

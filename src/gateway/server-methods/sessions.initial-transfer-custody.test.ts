@@ -26,7 +26,7 @@ import {
 import { writeSubagentSessionEntry } from "../../agents/subagents/registry/subagent-registry.persistence.test-support.js";
 import { resetSubagentRegistryForTests } from "../../agents/subagents/registry/subagent-registry.test-helpers.js";
 import { loadSubagentSessionEntry } from "../../agents/subagents/registry/subagent-session-reconciliation.js";
-import { revokeRequesterCronAuthority } from "../../agents/subagents/requester-cron-authority.js";
+import { admitRequesterCronAuthorityUserTurn } from "../../agents/subagents/requester-cron-authority.js";
 import * as requesterAttachment from "../../agents/subagents/requester-final-attachment.js";
 import { createSessionsYieldTool } from "../../agents/tools/sessions-yield-tool.js";
 import { getRuntimeConfig } from "../../config/config.js";
@@ -50,7 +50,7 @@ import { sessionSharingTestContext } from "./sessions-sharing.test-support.js";
 const fixture = useSubagentControlFixture();
 const requesterSessionKey = "agent:main:main";
 afterEach(() => {
-  revokeRequesterCronAuthority(requesterSessionKey);
+  admitRequesterCronAuthorityUserTurn({ sessionKey: requesterSessionKey });
   vi.useRealTimers();
 });
 
@@ -222,7 +222,7 @@ it.each(["unchanged", "replaced", "empty"] as const)(
                 .requesterTurnYielded,
             ).toBe(true);
           }
-          revokeRequesterCronAuthority(requesterSessionKey);
+          admitRequesterCronAuthorityUserTurn({ sessionKey: requesterSessionKey });
           expect(facts).toHaveLength(1);
           for (const release of releases) {
             expect(release).toHaveBeenCalled();
@@ -773,7 +773,7 @@ it("joins a real authority preparation without releasing borrowed facts before y
         expect(onYield).toHaveBeenCalledTimes(2);
         expect(releases[0]).not.toHaveBeenCalled();
         expect(releases[1]).toHaveBeenCalledOnce();
-        revokeRequesterCronAuthority(requesterSessionKey);
+        admitRequesterCronAuthorityUserTurn({ sessionKey: requesterSessionKey });
         for (const release of releases) {
           expect(release).toHaveBeenCalledOnce();
         }
@@ -781,7 +781,7 @@ it("joins a real authority preparation without releasing borrowed facts before y
         releaseAcknowledgement.resolve();
         releaseSecondRead.resolve();
         await Promise.allSettled([first, ...(second ? [second] : [])]);
-        revokeRequesterCronAuthority(requesterSessionKey);
+        admitRequesterCronAuthorityUserTurn({ sessionKey: requesterSessionKey });
       }
     });
   } finally {
